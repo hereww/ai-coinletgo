@@ -27,10 +27,13 @@ class PositionProtectionMonitor:
         notifier: TelegramNotifier,
         *,
         redis: Redis | None = None,
-        interval_seconds: float = 30,
+        # Websocket order/account events are the fast path.  The periodic
+        # sweep is a safety net and should not compete with strategy cycles or
+        # dashboard reads for Binance's signed REST quota.
+        interval_seconds: float = 60,
         failure_cooldown_seconds: float = 300,
         adjustment_cooldown_seconds: float = 60,
-        orphan_cleanup_interval_seconds: float = 300,
+        orphan_cleanup_interval_seconds: float = 900,
         event_debounce_seconds: float = 15,
     ) -> None:
         self.settings = settings

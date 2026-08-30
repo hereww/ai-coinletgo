@@ -15,7 +15,13 @@ from trading_system.ai.client import ResponsesModelClient
 from trading_system.api.security import SecurityService
 from trading_system.config import Settings
 from trading_system.domain.enums import HealthState, PositionSide, SystemMode
-from trading_system.domain.models import ExecutionIntent, HealthComponent, HealthReport
+from trading_system.domain.models import (
+    AccountState,
+    ExecutionIntent,
+    HealthComponent,
+    HealthReport,
+    PositionState,
+)
 from trading_system.exchange.base import ExchangeError, ExchangeUnknownStatusError
 from trading_system.exchange.binance import BinanceUSDMarketClient
 from trading_system.execution.exit import ExitExecutionManager
@@ -46,6 +52,15 @@ class SystemController:
         self.started_at = datetime.now(UTC)
         self._health_cache: tuple[float, HealthReport] | None = None
         self._health_lock = asyncio.Lock()
+        # The dashboard is a read-only view but it is polled by the browser.
+        # Keep a short shared snapshot so every open tab does not multiply
+        # signed Binance account/position requests (which can otherwise
+        # trigger a proxy-IP REST ban). Trading and protection paths continue
+        # to use their own fresh exchange reads.
+        self._dashboard_exchange_cache: tuple[
+            float, AccountState, list[PositionState]
+        ] | None = None
+        self._dashboard_exchange_lock = asyncio.Lock()
 
     def invalidate_health_cache(self) -> None:
         self._health_cache = None
@@ -537,14 +552,7 @@ class SystemController:
         position_count = 0
         if self.exchange.configured:
             try:
-                account = await self.exchange.get_account_state()
-                await self.repository.save_income_ledger(self.exchange.last_income_ledger)
-                account = await self.repository.apply_equity_checkpoints(
-                    account, record_history=False
-                )
-                hydrated = await self.repository.hydrate_positions(
-                    await self.exchange.get_positions()
-                )
+                account, hydrated = await self._dashboard_exchange_state()
                 positions = [item.model_dump(mode="json") for item in hydrated]
                 initial_risk = sum((item.initial_risk_usdt for item in hydrated), Decimal("0"))
                 position_count = len(hydrated)
@@ -619,6 +627,37 @@ class SystemController:
             "uptime_seconds": int((datetime.now(UTC) - self.started_at).total_seconds()),
         }
 
+    async def _dashboard_exchange_state(self) -> tuple[AccountState, list[PositionState]]:
+        """Read account state for the dashboard with a bounded short cache."""
+
+        now = time.monotonic()
+        cached = self._dashboard_exchange_cache
+        if cached is not None and now - cached[0] < 30:
+            return cached[1].model_copy(deep=True), [
+                item.model_copy(deep=True) for item in cached[2]
+            ]
+        async with self._dashboard_exchange_lock:
+            now = time.monotonic()
+            cached = self._dashboard_exchange_cache
+            if cached is not None and now - cached[0] < 30:
+                return cached[1].model_copy(deep=True), [
+                    item.model_copy(deep=True) for item in cached[2]
+                ]
+            account, raw_positions = await asyncio.gather(
+                self.exchange.get_account_state(), self.exchange.get_positions()
+            )
+            await self.repository.save_income_ledger(self.exchange.last_income_ledger)
+            account = await self.repository.apply_equity_checkpoints(
+                account, record_history=False
+            )
+            hydrated = await self.repository.hydrate_positions(raw_positions)
+            self._dashboard_exchange_cache = (
+                time.monotonic(),
+                account.model_copy(deep=True),
+                [item.model_copy(deep=True) for item in hydrated],
+            )
+            return account, hydrated
+
     async def _cycle_status(self) -> dict[str, Any]:
         """Expose the latest worker cycle instead of making stale decisions look interrupted."""
         try:
@@ -642,6 +681,17 @@ class SystemController:
             "approved": 0,
             "executed": 0,
         }
+
+    async def latest_cycle_status(self) -> dict[str, Any]:
+        """Return only the worker status for read-only console views.
+
+        Portfolio-v1 stores model decisions separately from the worker cycle.
+        Exposing this small Redis-backed view lets the portfolio page explain
+        that no model call occurred (for example while reconciliation is
+        pending) instead of making the last saved decision look interrupted.
+        """
+
+        return await self._cycle_status()
 
     async def _database_health(self) -> HealthComponent:
         started = time.perf_counter()

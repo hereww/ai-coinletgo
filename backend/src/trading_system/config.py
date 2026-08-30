@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # environment variables or the runtime configuration table.  This keeps
     # credentials out of the database, API responses, and audit records.
     http_proxy_enabled: bool = False
+    # Binance and the model relay may need different egress paths.  ``None``
+    # preserves the legacy shared-proxy behavior for existing installations;
+    # production deployments can explicitly set this to false when a proxy
+    # exit is rate-limited by Binance while the model relay still needs it.
+    binance_http_proxy_enabled: bool | None = None
 
     model_base_url: str | None = None
     model_name: str = "gpt-5.6"
@@ -310,6 +315,42 @@ class Settings(BaseSettings):
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return None
         return value.rstrip("/")
+
+    @property
+    def binance_http_proxy_url(self) -> str | None:
+        if not self.binance_proxy_enabled:
+            return None
+        value = self.http_proxy_secret
+        if not value:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        return value.rstrip("/")
+
+    @property
+    def binance_proxy_enabled(self) -> bool:
+        return (
+            self.http_proxy_enabled
+            if self.binance_http_proxy_enabled is None
+            else self.binance_http_proxy_enabled
+        )
+
+    @property
+    def binance_http_proxy_configured(self) -> bool:
+        return self.binance_proxy_enabled and self.binance_http_proxy_url is not None
+
+    @property
+    def binance_http_proxy_detail(self) -> str:
+        if self.binance_http_proxy_enabled is None:
+            return self.http_proxy_detail
+        if not self.binance_proxy_enabled:
+            return "Binance HTTP 代理未启用"
+        if not self.http_proxy_secret:
+            return "Binance HTTP 代理已启用但未挂载 http_proxy_url secret"
+        if self.binance_http_proxy_url is None:
+            return "Binance HTTP 代理地址无效，仅支持 http:// 或 https://"
+        return "Binance HTTP 代理已配置"
 
     @property
     def http_proxy_configured(self) -> bool:

@@ -3,10 +3,11 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import PortfolioPage from './PortfolioPage'
 
-const apiMock = vi.hoisted(() => ({ portfolioDecisions: vi.fn() }))
+const apiMock = vi.hoisted(() => ({ portfolioDecisions: vi.fn(), cycleStatus: vi.fn() }))
 vi.mock('../api/client', () => ({ api: apiMock }))
 
 it('shows the model target, compiled action and linked execution outcome', async () => {
+  apiMock.cycleStatus.mockResolvedValue({ state: 'EXECUTED', detail: '测试状态', snapshots: 1, candidates: 1, signals: 1, executed: 1 })
   apiMock.portfolioDecisions.mockResolvedValue([{
     id: 'decision-1', status: 'APPROVED', market_regime: 'TRENDING',
     portfolio_risk_budget_fraction: '0.8', model_name: 'portfolio-model',

@@ -59,6 +59,7 @@ export const api = {
   positions: () => request<DashboardData['positions']>('/api/v1/positions'),
   signals: () => request<Signal[]>('/api/v1/signals'),
   portfolioDecisions: () => request<PortfolioDecision[]>('/api/v1/portfolio-decisions'),
+  cycleStatus: () => request<DashboardData['cycle_status']>('/api/v1/cycle-status'),
   market: () => request<MarketRow[]>('/api/v1/market'),
   orders: () => request<OrderRow[]>('/api/v1/orders'),
   audit: () => request<AuditEvent[]>('/api/v1/audit'),

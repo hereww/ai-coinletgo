@@ -73,10 +73,10 @@ async def run_worker() -> None:
             settings.binance_base_url,
             settings.binance_ws_url,
             exchange.api_key,
-            proxy_url=settings.http_proxy_url,
+            proxy_url=settings.binance_http_proxy_url,
         )
         if exchange.configured
-        and (not settings.http_proxy_enabled or settings.http_proxy_configured)
+        and (not settings.binance_proxy_enabled or settings.binance_http_proxy_configured)
         else None
     )
     user_stream_task = (

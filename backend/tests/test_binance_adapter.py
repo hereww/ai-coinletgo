@@ -81,6 +81,28 @@ async def test_proxy_mode_is_configured_for_binance_and_missing_proxy_fails_clos
     finally:
         await client.close()
 
+
+@pytest.mark.asyncio
+async def test_binance_proxy_can_be_disabled_independently_of_model_proxy(
+    tmp_path: object,
+) -> None:
+    tmp_path.joinpath("binance_testnet_api_key").write_text("api-key", encoding="utf-8")
+    tmp_path.joinpath("binance_testnet_api_secret").write_text("api-secret", encoding="utf-8")
+    tmp_path.joinpath("http_proxy_url").write_text("http://proxy.example:8080", encoding="utf-8")
+    settings = Settings(
+        secret_dir=tmp_path,
+        binance_testnet_base_url="https://binance.example",
+        http_proxy_enabled=True,
+        binance_http_proxy_enabled=False,
+    )
+    client = BinanceUSDMarketClient(settings)
+    try:
+        assert not client.http._mounts
+        assert settings.http_proxy_configured is True
+        assert settings.binance_http_proxy_configured is False
+    finally:
+        await client.close()
+
     missing = tmp_path / "missing"
     missing.mkdir()
     missing.joinpath("binance_testnet_api_key").write_text("api-key", encoding="utf-8")

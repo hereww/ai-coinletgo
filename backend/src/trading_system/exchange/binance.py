@@ -50,7 +50,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             timeout=15,
             transport=transport,
             headers={"X-MBX-APIKEY": self.api_key},
-            proxy=settings.http_proxy_url,
+            proxy=settings.binance_http_proxy_url,
             trust_env=False,
         )
         self._filter_cache: dict[str, ExchangeFilters] = {}
@@ -83,8 +83,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
     async def health_check(self) -> tuple[bool, str]:
         if not self.configured:
             return False, "Binance credentials not configured"
-        if self.settings.http_proxy_enabled and not self.settings.http_proxy_configured:
-            return False, self.settings.http_proxy_detail
+        if self.settings.binance_proxy_enabled and not self.settings.binance_http_proxy_configured:
+            return False, self.settings.binance_http_proxy_detail
         try:
             await self._sync_time()
             # The timestamp is signed with the measured server offset.  A
@@ -123,7 +123,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         except httpx.HTTPError:
             detail = (
                 "Binance connection failed through HTTP proxy"
-                if self.settings.http_proxy_configured
+                if self.settings.binance_http_proxy_configured
                 else "Binance connection failed"
             )
             return False, detail
@@ -1500,8 +1500,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
         _retry_time_sync: int = 2,
     ) -> Any:
         await self._request_gate_wait()
-        if self.settings.http_proxy_enabled and not self.settings.http_proxy_configured:
-            raise ExchangeError(self.settings.http_proxy_detail)
+        if self.settings.binance_proxy_enabled and not self.settings.binance_http_proxy_configured:
+            raise ExchangeError(self.settings.binance_http_proxy_detail)
         values = dict(params or {})
         if signed:
             if not self.configured:
@@ -1517,7 +1517,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         except httpx.HTTPError:
             detail = (
                 "Binance request failed through HTTP proxy"
-                if self.settings.http_proxy_configured
+                if self.settings.binance_http_proxy_configured
                 else "Binance request failed"
             )
             raise ExchangeError(detail) from None

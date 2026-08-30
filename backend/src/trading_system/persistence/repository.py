@@ -635,7 +635,33 @@ class Repository:
                         input_hash=input_hash,
                     )
                 )
-                await session.commit()
+            # Persist the model's raw intent even when the deterministic
+            # compiler returns early (for example because the decision is
+            # expired, the system is paused, or a required position/filter is
+            # missing).  The compiler later upgrades these rows in-place using
+            # the same allocation_id, so the audit view can always compare
+            # AI target -> risk result -> execution outcome without losing an
+            # otherwise valid model response.
+            for allocation in decision.allocations:
+                allocation_id = str(allocation.allocation_id)
+                allocation_record = await session.get(
+                    PortfolioAllocationRecord, allocation_id
+                )
+                if allocation_record is None:
+                    session.add(
+                        PortfolioAllocationRecord(
+                            id=allocation_id,
+                            decision_id=str(decision.decision_id),
+                            symbol=allocation.symbol,
+                            status="MODEL_INTENT",
+                            payload={
+                                **allocation.model_dump(mode="json"),
+                                "allocation_id": allocation_id,
+                                "source": "ai_intent",
+                            },
+                        )
+                    )
+            await session.commit()
 
     async def get_portfolio_replay_input(
         self, decision_id: str
@@ -757,6 +783,34 @@ class Repository:
                 allocation_by_decision.setdefault(row.decision_id, []).append(
                     {**row.payload, "action_id": row.id, "status": row.status}
                 )
+            # Older Portfolio-v1 rows were written before raw AI allocations
+            # were persisted in the child table.  Reconstruct those intents
+            # from the immutable decision payload for the read-only audit API;
+            # this keeps historical decisions explainable without mutating
+            # production data during a GET request.
+            for record in decisions:
+                existing_ids = {
+                    str(item.get("allocation_id") or item.get("action_id"))
+                    for item in allocation_by_decision.get(record.id, [])
+                }
+                raw_allocations = record.payload.get("allocations", [])
+                if not isinstance(raw_allocations, list):
+                    continue
+                for raw in raw_allocations:
+                    if not isinstance(raw, dict):
+                        continue
+                    allocation_id = str(raw.get("allocation_id", ""))
+                    if not allocation_id or allocation_id in existing_ids:
+                        continue
+                    allocation_by_decision.setdefault(record.id, []).append(
+                        {
+                            **raw,
+                            "action_id": allocation_id,
+                            "status": "MODEL_INTENT",
+                            "source": "decision_payload",
+                        }
+                    )
+                    existing_ids.add(allocation_id)
             execution_by_action = {
                 row.id: {
                     "status": row.status,

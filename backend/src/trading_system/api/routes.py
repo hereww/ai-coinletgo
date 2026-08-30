@@ -135,6 +135,11 @@ async def portfolio_decisions(repo: Repo, _: CurrentUser) -> list[dict[str, Any]
     return await repo.list_portfolio_decisions()
 
 
+@router.get("/cycle-status")
+async def cycle_status(service: Controller, _: CurrentUser) -> dict[str, Any]:
+    return await service.latest_cycle_status()
+
+
 @router.get("/orders")
 async def orders(repo: Repo, _: CurrentUser) -> list[dict[str, Any]]:
     return await repo.list_orders()

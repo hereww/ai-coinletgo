@@ -122,3 +122,50 @@ async def test_old_portfolio_decision_without_snapshot_cannot_be_replayed(tmp_pa
         assert await repository.get_portfolio_replay_input(str(decision.decision_id)) is None
     finally:
         await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_portfolio_decision_keeps_raw_ai_allocations_when_compile_has_no_action(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'portfolio-intent.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    decision = PortfolioDecision(
+        market_regime="TRENDING",
+        portfolio_risk_budget_fraction=Decimal("0.4"),
+        allocations=[
+            PortfolioAllocation(
+                symbol="BTCUSDT",
+                target_side=PortfolioTargetSide.LONG,
+                allocation_fraction=Decimal("0.2"),
+                priority=1,
+                confidence=Decimal("0.8"),
+                entry_min=Decimal("99"),
+                entry_max=Decimal("101"),
+                stop_price=Decimal("95"),
+                target_price=Decimal("110"),
+                thesis="趋势延续",
+            )
+        ],
+        summary="保留 AI 意图",
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    try:
+        await repository.save_portfolio_decision(
+            decision,
+            status="REJECTED",
+            prompt_version="portfolio-v1",
+            model_name="test-model",
+            input_hash="c" * 64,
+        )
+        rows = await repository.list_portfolio_decisions()
+    finally:
+        await database.dispose()
+
+    assert len(rows) == 1
+    assert len(rows[0]["allocations"]) == 1
+    allocation = rows[0]["allocations"][0]
+    assert allocation["status"] == "MODEL_INTENT"
+    assert allocation["symbol"] == "BTCUSDT"
+    assert allocation["target_side"] == "LONG"

@@ -187,7 +187,7 @@
 .cycle-status strong { color: var(--text); font-size: 12px; }
 .cycle-status small { color: var(--faint); }
 .cycle-status-executed { border-color: var(--green-border); background: var(--green-soft); }
-.cycle-status-risk_rejected, .cycle-status-model_unavailable, .cycle-status-failed { border-color: var(--amber-border); background: var(--amber-soft); }
+.cycle-status-risk_rejected, .cycle-status-model_unavailable, .cycle-status-model_timeout, .cycle-status-model_throttled, .cycle-status-blocked_reconciliation, .cycle-status-exchange_unavailable, .cycle-status-failed { border-color: var(--amber-border); background: var(--amber-soft); }
 .cycle-status-no_candidates { border-color: var(--line); }
 .success-note { border-color: var(--green-border); background: var(--green-soft); color: var(--green-strong); }
 

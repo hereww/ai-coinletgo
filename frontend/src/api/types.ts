@@ -171,15 +171,25 @@ export interface PortfolioAllocation {
   action_id: string
   allocation_id: string | null
   symbol: string
-  action: 'OPEN' | 'ADD' | 'REDUCE' | 'CLOSE' | 'HOLD' | 'TIGHTEN_STOP' | 'REJECTED'
-  side: 'LONG' | 'SHORT' | null
-  current_quantity: string
-  target_quantity: string
-  quantity_delta: string
-  target_risk_usdt: string
+  /** Compiled action; absent when only the raw AI intent was persisted. */
+  action?: 'OPEN' | 'ADD' | 'REDUCE' | 'CLOSE' | 'HOLD' | 'TIGHTEN_STOP' | 'REJECTED'
+  side?: 'LONG' | 'SHORT' | null
+  current_quantity?: string
+  target_quantity?: string
+  quantity_delta?: string
+  target_risk_usdt?: string
   confidence: string
   priority: number
-  reasons: string[]
+  reasons?: string[]
+  reason_codes?: string[]
+  risk_flags?: string[]
+  target_side?: 'LONG' | 'SHORT' | 'FLAT'
+  allocation_fraction?: string
+  entry_min?: string | null
+  entry_max?: string | null
+  stop_price?: string | null
+  target_price?: string | null
+  thesis?: string
   status: string
   execution?: PortfolioExecution | null
 }
