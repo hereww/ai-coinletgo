@@ -196,7 +196,7 @@ class SystemController:
             return await self.repository.set_mode(SystemMode.LIVE_LOCKED)
         return await self.repository.set_mode(SystemMode.TESTNET)
 
-    async def reconcile_takeover(self) -> SystemMode:
+    async def reconcile_positions(self) -> SystemMode:
         if not self.exchange.configured:
             raise ValueError("Binance credentials are not configured")
         positions = await self.repository.hydrate_positions(await self.exchange.get_positions())

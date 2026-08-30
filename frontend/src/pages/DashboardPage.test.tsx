@@ -8,6 +8,7 @@ const apiMock = vi.hoisted(() => ({
   pause: vi.fn(),
   resumeTestnet: vi.fn(),
   flatten: vi.fn(),
+  reconcilePositions: vi.fn(),
   unlockLive: vi.fn(),
   runCycle: vi.fn(),
   config: vi.fn(),
@@ -136,7 +137,7 @@ describe('DashboardPage', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('does not queue a cycle while reconciliation takeover is pending', async () => {
+  it('does not queue a cycle while position reconciliation is pending', async () => {
     apiMock.dashboard.mockResolvedValue({
       ...dashboard,
       mode: 'RECONCILIATION_REQUIRED',
@@ -161,17 +162,16 @@ describe('DashboardPage', () => {
     expect(apiMock.runCycle).not.toHaveBeenCalled()
   })
 
-  it('requires typed confirmation and totp for emergency flatten', async () => {
+  it('requires the operator password for emergency flatten', async () => {
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: '紧急清仓' }))
     const dialog = screen.getByRole('dialog', { name: '紧急清仓' })
     const confirm = screen.getByRole('button', { name: '立即清仓' })
     expect(confirm).toBeDisabled()
-    fireEvent.change(screen.getByLabelText('输入 FLATTEN 确认'), { target: { value: 'FLATTEN' } })
-    fireEvent.change(screen.getByLabelText('TOTP 验证码'), { target: { value: '123456' } })
+    fireEvent.change(screen.getByLabelText('操作密码'), { target: { value: 'operator-password' } })
     expect(dialog).toBeInTheDocument()
     fireEvent.click(confirm)
-    await waitFor(() => expect(apiMock.flatten.mock.calls[0][0]).toBe('123456'))
+    await waitFor(() => expect(apiMock.flatten.mock.calls[0][0]).toBe('operator-password'))
   })
 
   it('queues a bounded AI and risk cycle directly from the dashboard', async () => {

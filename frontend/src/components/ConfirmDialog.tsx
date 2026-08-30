@@ -7,19 +7,17 @@ interface ConfirmDialogProps {
   title: string
   body: string
   confirmLabel: string
-  confirmationText?: string
-  requireTotp?: boolean
+  requirePassword?: boolean
   danger?: boolean
   busy?: boolean
   error?: string
   children?: ReactNode
   onClose: () => void
-  onConfirm: (totp: string) => void
+  onConfirm: (password: string) => void
 }
 
 export function ConfirmDialog(props: ConfirmDialogProps) {
-  const [totp, setTotp] = useState('')
-  const [confirmation, setConfirmation] = useState('')
+  const [password, setPassword] = useState('')
   const dialogRef = useRef<HTMLElement>(null)
   const initialFocusRef = useRef<HTMLInputElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
@@ -28,8 +26,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
 
   useEffect(() => {
     if (!props.open) return
-    setTotp('')
-    setConfirmation('')
+    setPassword('')
     previousFocusRef.current = document.activeElement as HTMLElement | null
     const focusTarget = initialFocusRef.current ?? dialogRef.current
     focusTarget?.focus()
@@ -37,7 +34,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
   }, [props.open])
 
   if (!props.open) return null
-  const canConfirm = (!props.requireTotp || totp.length === 6) && (!props.confirmationText || confirmation === props.confirmationText)
+  const canConfirm = !props.requirePassword || password.length > 0
 
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === 'Escape' && !props.busy) {
@@ -73,20 +70,15 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
         </div>
         <p id={bodyId}>{props.body}</p>
         {props.children}
-        {props.confirmationText ? (
-          <label className="field-label">输入 {props.confirmationText} 确认
-            <input ref={!props.requireTotp ? initialFocusRef : undefined} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" />
-          </label>
-        ) : null}
-        {props.requireTotp ? (
-          <label className="field-label">TOTP 验证码
-            <input ref={initialFocusRef} inputMode="numeric" maxLength={6} value={totp} onChange={(event) => setTotp(event.target.value.replace(/\D/g, ''))} autoComplete="one-time-code" />
+        {props.requirePassword ? (
+          <label className="field-label">操作密码
+            <input ref={initialFocusRef} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
           </label>
         ) : null}
         {props.error ? <div className="inline-error" role="alert" aria-live="assertive">{props.error}</div> : null}
         <div className="dialog-actions">
           <Button type="button" onClick={props.onClose} disabled={props.busy}>取消</Button>
-          <Button type="button" variant={props.danger ? 'danger' : 'primary'} onClick={() => props.onConfirm(totp)} disabled={!canConfirm || props.busy}>{props.busy ? '处理中...' : props.confirmLabel}</Button>
+          <Button type="button" variant={props.danger ? 'danger' : 'primary'} onClick={() => props.onConfirm(password)} disabled={!canConfirm || props.busy}>{props.busy ? '处理中...' : props.confirmLabel}</Button>
         </div>
       </section>
     </div>

@@ -6,7 +6,6 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Annotated, cast
 
-import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from fastapi import Cookie, Depends, Header, HTTPException, Request, Response, status
@@ -123,31 +122,22 @@ class SecurityService:
         if not secrets.compare_digest(header_token, user.csrf_token):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF token invalid")
 
-    def verify_totp(self, code: str) -> bool:
+    def verify_password(self, password: str) -> bool:
         if not self.authentication_required:
             return True
-        secret = self.settings.auth_totp_secret
-        if not secret or not code:
+        password_hash = self.settings.auth_password_hash
+        if not password_hash or not password:
             return False
-        return bool(pyotp.TOTP(secret).verify(code, valid_window=1))
+        return self._verify_password(password_hash, password)
 
     def production_configured(self) -> bool:
         if not self.authentication_required:
             return self.settings.app_env != "production"
         password_hash = self.settings.auth_password_hash
-        totp_secret = self.settings.auth_totp_secret
         session_secret = self.settings.read_secret("session_secret")
-        totp_valid = False
-        if totp_secret:
-            try:
-                pyotp.TOTP(totp_secret).at(0)
-                totp_valid = True
-            except (TypeError, ValueError):
-                totp_valid = False
         return all(
             (
                 password_hash and password_hash.startswith("$argon2id$"),
-                totp_valid,
                 session_secret and len(session_secret) >= 32,
                 self.settings.cookie_secure,
             )

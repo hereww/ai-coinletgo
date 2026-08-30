@@ -39,7 +39,7 @@ def test_api_starts_in_locked_down_unconfigured_state() -> None:
 
         run_cycle = client.post(
             "/api/v1/actions/run-cycle",
-            json={"totp_code": "", "confirmation": "RUN CYCLE"},
+            json={"password": ""},
         )
         assert run_cycle.status_code == 409
         assert "Binance credentials" in run_cycle.json()["detail"]
@@ -49,7 +49,7 @@ def test_live_unlock_is_rejected_in_testnet_runtime() -> None:
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/actions/unlock-live",
-            json={"totp_code": "", "confirmation": "UNLOCK LIVE"},
+            json={"password": ""},
         )
         assert response.status_code == 409
         assert "not configured for the live" in response.json()["detail"]

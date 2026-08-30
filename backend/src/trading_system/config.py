@@ -238,10 +238,6 @@ class Settings(BaseSettings):
         return self.read_secret("auth_password_hash")
 
     @property
-    def auth_totp_secret(self) -> str | None:
-        return self.read_secret("auth_totp_secret")
-
-    @property
     def model_api_key(self) -> str | None:
         return self.read_secret("model_api_key")
 

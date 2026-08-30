@@ -6,7 +6,7 @@ import { LoginPage } from './LoginPage'
 const apiMock = vi.hoisted(() => ({ login: vi.fn() }))
 vi.mock('../api/client', () => ({ api: apiMock, apiBaseUrl: '' }))
 
-it('logs in with the configured username and password without a TOTP field', async () => {
+it('logs in with the configured username and password', async () => {
   apiMock.login.mockResolvedValue({ username: 'admin', csrf_token: 'csrf' })
   const onSuccess = vi.fn()
   render(
@@ -15,7 +15,6 @@ it('logs in with the configured username and password without a TOTP field', asy
     </QueryClientProvider>,
   )
 
-  expect(screen.queryByLabelText('TOTP 验证码')).not.toBeInTheDocument()
   expect(screen.getByLabelText('用户名')).toHaveValue('admin')
   fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'test-password' } })
   fireEvent.click(screen.getByRole('button', { name: '登录控制台' }))

@@ -13,7 +13,7 @@ import { PositionsTable } from '../features/dashboard/PositionsTable'
 import { RiskCapacity } from '../features/dashboard/RiskCapacity'
 import { SignalsList } from '../features/dashboard/SignalsList'
 
-type Dialog = 'flatten' | 'unlock' | 'takeover' | 'manual-entry' | null
+type Dialog = 'flatten' | 'unlock' | 'reconcile' | 'manual-entry' | null
 
 const EquityChart = lazy(() => import('../features/dashboard/EquityChart').then((module) => ({ default: module.EquityChart })))
 
@@ -24,7 +24,7 @@ export default function DashboardPage() {
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['dashboard'] })
   const pause = useMutation({ mutationFn: api.pause, onSuccess: refresh })
   const resume = useMutation({ mutationFn: () => api.resumeTestnet(), onSuccess: () => { setDialog(null); refresh() } })
-  const takeover = useMutation({ mutationFn: api.reconcileTakeover, onSuccess: () => { setDialog(null); refresh() } })
+  const reconcile = useMutation({ mutationFn: api.reconcilePositions, onSuccess: () => { setDialog(null); refresh() } })
   const flatten = useMutation({ mutationFn: api.flatten, onSuccess: () => { setDialog(null); refresh() } })
   const unlock = useMutation({ mutationFn: api.unlockLive, onSuccess: () => { setDialog(null); refresh() } })
   const runCycle = useMutation({
@@ -85,7 +85,7 @@ export default function DashboardPage() {
           <Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => dashboard.refetch()} aria-label="刷新数据">刷新</Button>
           {data.environment === 'testnet' ? <Button icon={<Plus size={15} />} onClick={() => setDialog('manual-entry')} disabled={!data.health.ready || data.mode !== 'TESTNET'}>手动开仓</Button> : null}
           <Button icon={<Play size={15} />} onClick={() => runCycle.mutate({ mode: data.mode, environment: data.environment })} disabled={!data.health.ready || runCycle.isPending || reconciliationBlocked}>{runCycle.isPending ? '分析执行中...' : reconciliationBlocked ? '接管后再分析' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
-          {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('takeover')}>接管仓位</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => resume.mutate()} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
+          {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('reconcile')}>接管仓位</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => resume.mutate()} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
           {data.environment === 'live' ? <Button icon={<LockKeyhole size={15} />} onClick={() => setDialog('unlock')}>解锁实盘</Button> : null}
           <Button variant="danger" icon={<OctagonAlert size={15} />} onClick={() => setDialog('flatten')}>紧急清仓</Button>
         </div>
@@ -112,9 +112,9 @@ export default function DashboardPage() {
         <div className="surface"><div className="section-head"><h2>系统健康</h2><span>{data.health.ready ? '全部正常' : '需要处理'}</span></div><HealthList components={data.health.components} /></div>
       </section>
 
-      <ConfirmDialog open={dialog === 'flatten'} title="紧急清仓" body="系统将暂停新开仓，并以市价关闭专用子账户中的全部受管仓位。" confirmLabel="立即清仓" confirmationText="FLATTEN" requireTotp danger busy={flatten.isPending} error={flatten.error?.message} onClose={() => setDialog(null)} onConfirm={(totp) => flatten.mutate(totp)} />
-      <ConfirmDialog open={dialog === 'unlock'} title="解锁实盘" body="只有在币安、模型、数据库、时间同步和认证健康检查全部通过时，实盘才会启用。" confirmLabel="检查并解锁" confirmationText="UNLOCK LIVE" requireTotp busy={unlock.isPending} error={unlock.error?.message} onClose={() => setDialog(null)} onConfirm={(totp) => unlock.mutate(totp)} />
-      <ConfirmDialog open={dialog === 'takeover'} title="接管交易所仓位" body="系统会重新读取币安仓位。只有每个仓位都存在可识别的交易所端硬止损时，才会接受当前状态。" confirmLabel="验证并接管" confirmationText="TAKEOVER" requireTotp busy={takeover.isPending} error={takeover.error?.message} onClose={() => setDialog(null)} onConfirm={(totp) => takeover.mutate(totp)} />
+      <ConfirmDialog open={dialog === 'flatten'} title="紧急清仓" body="系统将暂停新开仓，并以市价关闭专用子账户中的全部受管仓位。" confirmLabel="立即清仓" requirePassword danger busy={flatten.isPending} error={flatten.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => flatten.mutate(password)} />
+      <ConfirmDialog open={dialog === 'unlock'} title="解锁实盘" body="只有在币安、模型、数据库、时间同步和认证健康检查全部通过时，实盘才会启用。" confirmLabel="检查并解锁" requirePassword busy={unlock.isPending} error={unlock.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => unlock.mutate(password)} />
+      <ConfirmDialog open={dialog === 'reconcile'} title="接管交易所仓位" body="系统会重新读取币安仓位。只有每个仓位都存在可识别的交易所端硬止损时，才会接受当前状态。" confirmLabel="验证并接管" requirePassword busy={reconcile.isPending} error={reconcile.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => reconcile.mutate(password)} />
       <ManualEntryDialog open={dialog === 'manual-entry'} onClose={() => setDialog(null)} />
     </>
   )

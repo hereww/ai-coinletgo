@@ -12,9 +12,8 @@ class LoginRequest(BaseModel):
     password: str = Field(max_length=256)
 
 
-class TotpActionRequest(BaseModel):
-    totp_code: str = Field(default="", max_length=12)
-    confirmation: str = Field(default="", max_length=80)
+class PasswordActionRequest(BaseModel):
+    password: str = Field(default="", max_length=256)
     target: str = Field(default="", max_length=20)
 
 
@@ -68,7 +67,7 @@ class ConfigUpdateRequest(BaseModel):
         default=None, ge=0, le=1
     )
     portfolio_rebalance_cooldown_minutes: int | None = Field(default=None, ge=0, le=1_440)
-    totp_code: str = Field(default="", max_length=12)
+    password: str = Field(default="", max_length=256)
 
     @field_validator("entry_symbols", mode="before")
     @classmethod
@@ -149,8 +148,7 @@ class ReducePositionRequest(BaseModel):
     position_id: str = Field(min_length=1, max_length=120)
     fraction: Decimal = Field(gt=0, le=1)
     operation_id: str = Field(min_length=8, max_length=80)
-    totp_code: str = Field(default="", max_length=12)
-    confirmation: str = Field(default="", max_length=80)
+    password: str = Field(default="", max_length=256)
 
     @field_validator("fraction")
     @classmethod

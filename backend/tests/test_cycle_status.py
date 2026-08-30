@@ -49,7 +49,10 @@ class StatusRedis:
     [
         ("another worker owns the cycle lock", "WORKER_BUSY"),
         ("position reconciliation required", "BLOCKED_RECONCILIATION"),
-        ("position reconciliation pending; manual takeover required", "BLOCKED_RECONCILIATION"),
+        (
+            "position reconciliation pending; manual operator action required",
+            "BLOCKED_RECONCILIATION",
+        ),
     ],
 )
 async def test_cycle_status_distinguishes_non_model_blockers(

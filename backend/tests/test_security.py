@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pyotp
 import pytest
 from argon2 import PasswordHasher
 from fastapi import HTTPException
@@ -9,18 +8,16 @@ from trading_system.api.security import SecurityService
 from trading_system.config import Settings
 
 
-def secured_settings(tmp_path: object) -> tuple[Settings, str]:
-    secret = pyotp.random_base32()
+def secured_settings(tmp_path: object) -> Settings:
     tmp_path.joinpath("auth_password_hash").write_text(
         PasswordHasher().hash("correct-password"), encoding="utf-8"
     )
-    tmp_path.joinpath("auth_totp_secret").write_text(secret, encoding="utf-8")
     tmp_path.joinpath("session_secret").write_text("s" * 48, encoding="utf-8")
-    return Settings(auth_required=True, secret_dir=tmp_path), secret
+    return Settings(auth_required=True, secret_dir=tmp_path)
 
 
 def test_login_session_and_csrf(tmp_path: object) -> None:
-    settings, _ = secured_settings(tmp_path)
+    settings = secured_settings(tmp_path)
     service = SecurityService(settings)
     token, csrf = service.login("admin", "correct-password", "127.0.0.1")
     user = service.authenticate(token)
@@ -31,7 +28,7 @@ def test_login_session_and_csrf(tmp_path: object) -> None:
 
 
 def test_login_rate_limit(tmp_path: object) -> None:
-    settings, _ = secured_settings(tmp_path)
+    settings = secured_settings(tmp_path)
     settings.login_attempts_per_15_minutes = 2
     service = SecurityService(settings)
     for _ in range(2):
@@ -49,19 +46,19 @@ def test_login_rate_limit(tmp_path: object) -> None:
 def test_login_rejects_invalid_username_or_password(
     tmp_path: object, username: str, password: str
 ) -> None:
-    settings, _ = secured_settings(tmp_path)
+    settings = secured_settings(tmp_path)
     service = SecurityService(settings)
     with pytest.raises(HTTPException, match="Invalid credentials") as caught:
         service.login(username, password, "127.0.0.1")
     assert caught.value.status_code == 401
 
 
-def test_sensitive_actions_still_require_valid_totp(tmp_path: object) -> None:
-    settings, secret = secured_settings(tmp_path)
+def test_sensitive_actions_require_the_configured_password(tmp_path: object) -> None:
+    settings = secured_settings(tmp_path)
     service = SecurityService(settings)
-    assert service.verify_totp("") is False
-    assert service.verify_totp("000000") is False
-    assert service.verify_totp(pyotp.TOTP(secret).now()) is True
+    assert service.verify_password("") is False
+    assert service.verify_password("wrong-password") is False
+    assert service.verify_password("correct-password") is True
 
 
 def test_live_environment_rejects_insecure_settings(tmp_path: object) -> None:
@@ -84,7 +81,7 @@ def test_live_environment_rejects_insecure_settings(tmp_path: object) -> None:
         )
 
 
-def test_live_totp_is_fail_closed_even_if_auth_flag_is_mutated(tmp_path: object) -> None:
+def test_live_password_is_fail_closed_even_if_auth_flag_is_mutated(tmp_path: object) -> None:
     settings = Settings(
         secret_dir=tmp_path,
         app_env="production",
@@ -94,7 +91,7 @@ def test_live_totp_is_fail_closed_even_if_auth_flag_is_mutated(tmp_path: object)
     )
     service = SecurityService(settings)
     settings.auth_required = False
-    assert service.verify_totp("") is False
+    assert service.verify_password("") is False
 
 
 def test_production_rejects_non_official_binance_endpoints(tmp_path: object) -> None:
@@ -119,7 +116,7 @@ def test_production_rejects_non_official_binance_endpoints(tmp_path: object) -> 
 
 
 def test_production_requires_argon2id_password_hash(tmp_path: object) -> None:
-    settings, secret = secured_settings(tmp_path)
+    settings = secured_settings(tmp_path)
     settings.app_env = "production"
     settings.cookie_secure = True
     assert SecurityService(settings).production_configured() is True
@@ -127,17 +124,16 @@ def test_production_requires_argon2id_password_hash(tmp_path: object) -> None:
         "$argon2i$v=19$m=65536,t=3,p=4$bad$bad", encoding="utf-8"
     )
     assert SecurityService(settings).production_configured() is False
-    assert secret
 
 
-def test_production_rejects_weak_session_and_invalid_totp_secrets(tmp_path: object) -> None:
-    settings, _ = secured_settings(tmp_path)
+def test_production_rejects_weak_session_and_missing_password_hash(tmp_path: object) -> None:
+    settings = secured_settings(tmp_path)
     settings.app_env = "production"
     settings.cookie_secure = True
     tmp_path.joinpath("session_secret").write_text("too-short", encoding="utf-8")
     assert SecurityService(settings).production_configured() is False
     tmp_path.joinpath("session_secret").write_text("s" * 48, encoding="utf-8")
-    tmp_path.joinpath("auth_totp_secret").write_text("not-base32!", encoding="utf-8")
+    tmp_path.joinpath("auth_password_hash").write_text("not-a-password-hash", encoding="utf-8")
     assert SecurityService(settings).production_configured() is False
 
 

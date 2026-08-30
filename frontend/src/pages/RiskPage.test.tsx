@@ -34,16 +34,17 @@ const config = {
   model_daily_request_limit: 110,
 }
 
-it('confirms editable risk settings without TOTP', async () => {
+it('confirms editable risk settings with the operator password', async () => {
   apiMock.config.mockResolvedValue(config)
   apiMock.updateConfig.mockResolvedValue({ ...config, capital_limit_usdt: 900 })
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
   fireEvent.change(await screen.findByLabelText('资金上限 (USDT)'), { target: { value: '900' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   expect(await screen.findByRole('dialog', { name: '确认保存开仓策略' })).toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('操作密码'), { target: { value: 'operator-password' } })
   fireEvent.click(screen.getByRole('button', { name: '确认保存' }))
-  await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ capital_limit_usdt: 900 })))
-  expect(apiMock.updateConfig.mock.calls[0][0]).not.toHaveProperty('totp_code')
+  await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ capital_limit_usdt: 900, password: 'operator-password' })))
+  expect(apiMock.updateConfig.mock.calls[0][0]).not.toHaveProperty('confirmation')
 })
 
 it('allows the configured leverage ceiling to be raised to 30x', async () => {
@@ -52,6 +53,7 @@ it('allows the configured leverage ceiling to be raised to 30x', async () => {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
   fireEvent.change(await screen.findByLabelText('最高杠杆'), { target: { value: '30' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  fireEvent.change(await screen.findByLabelText('操作密码'), { target: { value: 'operator-password' } })
   fireEvent.click(await screen.findByRole('button', { name: '确认保存' }))
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ max_leverage: 30 })))
 })
@@ -65,6 +67,7 @@ it('allows the scan interval to be configured from 15 to 120 minutes', async () 
   expect(interval).toHaveAttribute('max', '120')
   fireEvent.change(interval, { target: { value: '30' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  fireEvent.change(await screen.findByLabelText('操作密码'), { target: { value: 'operator-password' } })
   fireEvent.click(await screen.findByRole('button', { name: '确认保存' }))
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ scan_interval_minutes: 30 })))
 })
@@ -105,6 +108,7 @@ it('allows previously locked risk limits and wide stop ranges to be edited', asy
   expect(screen.getByLabelText('最小止损距离 (ATR)')).not.toHaveAttribute('min')
   expect(screen.getByLabelText('最大止损距离 (ATR)')).not.toHaveAttribute('max')
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  fireEvent.change(await screen.findByLabelText('操作密码'), { target: { value: 'operator-password' } })
   fireEvent.click(await screen.findByRole('button', { name: '确认保存' }))
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({
     daily_loss_pct: 0.08,

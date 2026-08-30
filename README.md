@@ -60,7 +60,7 @@ pnpm run dev
 - `binance_testnet_api_key`、`binance_testnet_api_secret`
 - `binance_live_api_key`、`binance_live_api_secret`
 - `model_api_key`
-- `auth_password_hash`、`auth_totp_secret`、`session_secret`
+- `auth_password_hash`、`session_secret`
 - `telegram_bot_token`、`telegram_chat_id`
 - `postgres_password`、`backup_encryption_key`
 
@@ -81,7 +81,7 @@ cd backend
 .venv/bin/python -c 'from argon2 import PasswordHasher; import getpass; print(PasswordHasher().hash(getpass.getpass()))'
 ```
 
-将输出写入 `secrets/auth_password_hash`。`auth_totp_secret` 必须由你自己的 TOTP 初始化流程生成并保存在密码管理器中，不要写入 `.env` 或日志。
+将输出写入 `secrets/auth_password_hash`。敏感操作统一使用该操作密码验证，不再需要额外确认词或动态验证码。
 
 测试网和模型中转密钥可在服务器项目目录通过交互式脚本写入，输入不会回显：
 
@@ -105,7 +105,7 @@ docker compose -f docker-compose.server.yml up -d --build api worker
 
 实盘解锁接口要求：
 
-- 密码会话与 TOTP 验证通过；
+- 密码会话与操作密码验证通过；
 - 币安时间、账户和订单对账正常；
 - Responses API 真实结构化输出探针通过；
 - 市场数据、用户数据流、数据库和 Redis 健康；
@@ -116,7 +116,7 @@ docker compose -f docker-compose.server.yml up -d --build api worker
 
 缺少任何条件时，系统保持 `LIVE_LOCKED`。模型、行情或账户流故障时不允许新开仓，已有仓位继续由交易所端保护单和本地状态机管理。
 
-`RECONCILIATION_REQUIRED` 不能通过普通恢复操作绕过。只能在 TOTP 确认后接管全部已保护仓位，或执行紧急清仓。切换测试网/实盘运行环境也会自动进入该状态。
+`RECONCILIATION_REQUIRED` 不能通过普通恢复操作绕过。只能在操作密码验证后完成全部已保护仓位的对账，或执行紧急清仓。切换测试网/实盘运行环境也会自动进入该状态。
 
 ## 测试网验收
 
@@ -127,7 +127,7 @@ docker compose -f docker-compose.server.yml up -d --build api worker
 3. 每次新增成交量在一秒轮询内建立硬止损；保护失败时立即市价平仓并暂停。
 4. 1R/2R 分批止盈、费用保本止损和最后 20% 的 1.5 ATR 跟踪。
 5. Worker 重启、用户数据流断线、时钟漂移和仓位不一致。
-6. 日亏损、回撤熔断、TOTP 恢复、接管和紧急清仓。
+6. 日亏损、回撤熔断、密码验证恢复、仓位对账和紧急清仓。
 
 没有完成上述官方测试网验收前，不应把 `BINANCE_ENVIRONMENT` 切换为 `live`。
 

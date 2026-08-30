@@ -46,7 +46,6 @@ services:
       SECRET_DIR: /run/secrets
     secrets:
       - auth_password_hash
-      - auth_totp_secret
       - session_secret
       - postgres_password
       - model_api_key
@@ -164,8 +163,6 @@ secrets:
     file: ./secrets/backup_encryption_key
   auth_password_hash:
     file: ./secrets/auth_password_hash
-  auth_totp_secret:
-    file: ./secrets/auth_totp_secret
   session_secret:
     file: ./secrets/session_secret
   model_api_key:

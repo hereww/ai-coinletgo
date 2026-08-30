@@ -86,39 +86,38 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ profile_id: profileId }),
     }),
-  updateConfig: (payload: Partial<RiskConfig> & { totp_code?: string }) =>
+  updateConfig: (payload: Partial<RiskConfig> & { password?: string }) =>
     request<RiskConfig>('/api/v1/config', { method: 'PATCH', body: JSON.stringify(payload) }),
   pause: () => request<{ mode: string }>('/api/v1/actions/pause', { method: 'POST' }),
-  runCycle: (totpCode = '') => request<{ status: string; operation_id: string }>('/api/v1/actions/run-cycle', {
+  runCycle: (password = '') => request<{ status: string; operation_id: string }>('/api/v1/actions/run-cycle', {
     method: 'POST',
-    body: JSON.stringify({ totp_code: totpCode, confirmation: 'RUN CYCLE' }),
+    body: JSON.stringify({ password }),
   }),
   resumeTestnet: () =>
     request<{ mode: string }>('/api/v1/actions/resume-testnet', { method: 'POST' }),
-  reconcileTakeover: (totpCode: string) =>
-    request<{ mode: string }>('/api/v1/actions/reconcile-takeover', {
+  reconcilePositions: (password: string) =>
+    request<{ mode: string }>('/api/v1/actions/reconcile', {
       method: 'POST',
-      body: JSON.stringify({ totp_code: totpCode, confirmation: 'TAKEOVER' }),
+      body: JSON.stringify({ password }),
     }),
-  unlockLive: (totpCode: string) =>
+  unlockLive: (password: string) =>
     request<{ mode: string }>('/api/v1/actions/unlock-live', {
       method: 'POST',
-      body: JSON.stringify({ totp_code: totpCode, confirmation: 'UNLOCK LIVE' }),
+      body: JSON.stringify({ password }),
     }),
-  flatten: (totpCode: string) =>
+  flatten: (password: string) =>
     request<{ mode: string }>('/api/v1/actions/emergency-flatten', {
       method: 'POST',
-      body: JSON.stringify({ totp_code: totpCode, confirmation: 'FLATTEN' }),
+      body: JSON.stringify({ password }),
     }),
-  reducePosition: (positionId: string, fraction: number, totpCode: string) =>
+  reducePosition: (positionId: string, fraction: number, password: string) =>
     request<OrderRow>('/api/v1/actions/reduce-position', {
       method: 'POST',
       body: JSON.stringify({
         position_id: positionId,
         fraction,
         operation_id: crypto.randomUUID(),
-        totp_code: totpCode,
-        confirmation: 'REDUCE',
+        password,
       }),
     }),
   manualEntry: (payload: ManualEntryDraft & { operation_id: string }) =>

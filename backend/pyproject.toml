@@ -19,7 +19,6 @@ dependencies = [
   "orjson>=3.10,<4",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
-  "pyotp>=2.9,<3",
   "redis>=5.2,<6",
   "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.34,<1",

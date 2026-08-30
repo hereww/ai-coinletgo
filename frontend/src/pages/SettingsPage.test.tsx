@@ -80,7 +80,7 @@ it('shows testnet and model integration state and runs a non-ordering testnet pr
   await waitFor(() => expect(apiMock.probeIntegration).toHaveBeenCalledWith('testnet'))
 })
 
-it('saves model settings directly without a confirmation dialog or totp', async () => {
+it('saves model settings directly without an extra confirmation dialog', async () => {
   renderPage()
   const baseUrl = await screen.findByLabelText('OpenAI 中转 Base URL')
   fireEvent.change(baseUrl, { target: { value: 'https://relay.example.com/v1' } })

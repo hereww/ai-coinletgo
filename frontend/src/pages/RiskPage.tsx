@@ -24,7 +24,7 @@ export default function RiskPage() {
   }, [config.data])
 
   const save = useMutation({
-    mutationFn: () => api.updateConfig(form),
+    mutationFn: (password: string) => api.updateConfig({ ...form, password }),
     onSuccess: (data) => {
       queryClient.setQueryData(['config'], data)
       setConfirmOpen(false)
@@ -164,10 +164,11 @@ export default function RiskPage() {
       title="确认保存开仓策略"
       body="保存后，Worker 会自动读取新的扫描周期；下一轮行情分析将按照新的方向、触发条件、代币范围和风控门槛运行。"
       confirmLabel="确认保存"
+      requirePassword
       busy={save.isPending}
       error={save.error?.message}
       onClose={() => { if (!save.isPending) setConfirmOpen(false) }}
-      onConfirm={() => save.mutate()}
+      onConfirm={(password) => save.mutate(password)}
     />
   </>
 }

@@ -13,9 +13,9 @@ from trading_system.api.schemas import (
     ManualEntryRequest,
     ModelProfileSelectRequest,
     ModelRelayUpdateRequest,
+    PasswordActionRequest,
     ReducePositionRequest,
     ReplayRequest,
-    TotpActionRequest,
 )
 from trading_system.api.security import CurrentUser, MutatingUser, SecurityService
 from trading_system.backtest.service import ReplayService
@@ -192,7 +192,7 @@ async def integrations(service: Controller, _: CurrentUser) -> dict[str, Any]:
 
 @router.post("/integrations/probe")
 async def probe_integration(
-    payload: TotpActionRequest,
+    payload: PasswordActionRequest,
     request: Request,
     user: MutatingUser,
     service: Controller,
@@ -306,17 +306,19 @@ async def update_config(
     payload: ConfigUpdateRequest,
     request: Request,
     user: MutatingUser,
+    security: Security,
     app_settings: AppSettings,
     repo: Repo,
 ) -> dict[str, Any]:
-    updates = payload.model_dump(exclude_none=True, exclude={"totp_code"})
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
+    updates = payload.model_dump(exclude_none=True, exclude={"password"})
     if updates.get("portfolio_strategy_enabled") and app_settings.binance_environment != "testnet":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "Portfolio-v1 strategy is limited to Binance testnet",
         )
-    # The UI confirms this whole configuration change with an explicit modal.
-    # Keep totp_code accepted for old clients, but no longer require it here.
+    # The UI confirms this whole configuration change with the operator password.
     proposed_min_stop = updates.get("min_stop_atr", app_settings.min_stop_atr)
     proposed_max_stop = updates.get("max_stop_atr", app_settings.max_stop_atr)
     if proposed_min_stop > proposed_max_stop:
@@ -355,7 +357,7 @@ async def update_config(
         action="update_config",
         resource="risk_limits",
         outcome="success",
-        detail={"changed_fields": sorted(updates), "confirmation": "modal"},
+        detail={"changed_fields": sorted(updates), "confirmation": "password"},
         ip_address=request.client.host if request.client else None,
     )
     return await get_config(app_settings, user)
@@ -378,22 +380,20 @@ async def pause(
 
 @router.post("/actions/run-cycle")
 async def run_cycle(
-    payload: TotpActionRequest,
+    payload: PasswordActionRequest,
     request: Request,
     user: MutatingUser,
     security: Security,
     service: Controller,
     repo: Repo,
 ) -> dict[str, str]:
-    # Testnet cycles are already bounded by the testnet gateway and hard risk
-    # gates, so the dashboard can trigger them directly. Keep TOTP mandatory
-    # for live mode and reject malformed confirmations in every environment.
-    confirmation_valid = payload.confirmation == "RUN CYCLE"
-    totp_valid = security.verify_totp(payload.totp_code)
-    if not confirmation_valid or (
-        service.settings.binance_environment == "live" and not totp_valid
+    # Testnet cycles are bounded by the testnet gateway and hard risk gates, so
+    # the dashboard can trigger them directly. Live manual cycles still require
+    # the operator password even though live unlock has a separate gate.
+    if service.settings.binance_environment == "live" and not security.verify_password(
+        payload.password
     ):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Run cycle confirmation failed")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
         operation_id = await service.queue_cycle()
     except ValueError as error:
@@ -431,23 +431,23 @@ async def resume_testnet(
     return {"mode": mode.value}
 
 
-@router.post("/actions/reconcile-takeover")
-async def reconcile_takeover(
-    payload: TotpActionRequest,
+@router.post("/actions/reconcile")
+async def reconcile_positions(
+    payload: PasswordActionRequest,
     request: Request,
     user: MutatingUser,
     security: Security,
     service: Controller,
     repo: Repo,
 ) -> dict[str, str]:
-    if payload.confirmation != "TAKEOVER" or not security.verify_totp(payload.totp_code):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Takeover confirmation failed")
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
-        mode = await service.reconcile_takeover()
+        mode = await service.reconcile_positions()
     except ValueError as error:
         await repo.audit(
             actor=user.username,
-            action="reconcile_takeover",
+            action="reconcile_positions",
             resource="positions",
             outcome="denied",
             detail={"reason": str(error)},
@@ -456,7 +456,7 @@ async def reconcile_takeover(
         raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
     await repo.audit(
         actor=user.username,
-        action="reconcile_takeover",
+        action="reconcile_positions",
         resource="positions",
         outcome="success",
         ip_address=request.client.host if request.client else None,
@@ -466,15 +466,15 @@ async def reconcile_takeover(
 
 @router.post("/actions/unlock-live")
 async def unlock_live(
-    payload: TotpActionRequest,
+    payload: PasswordActionRequest,
     request: Request,
     user: MutatingUser,
     security: Security,
     service: Controller,
     repo: Repo,
 ) -> dict[str, str]:
-    if payload.confirmation != "UNLOCK LIVE" or not security.verify_totp(payload.totp_code):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Live unlock confirmation failed")
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
         mode = await service.unlock_live()
     except ValueError as error:
@@ -499,15 +499,15 @@ async def unlock_live(
 
 @router.post("/actions/emergency-flatten")
 async def emergency_flatten(
-    payload: TotpActionRequest,
+    payload: PasswordActionRequest,
     request: Request,
     user: MutatingUser,
     security: Security,
     service: Controller,
     repo: Repo,
 ) -> dict[str, Any]:
-    if payload.confirmation != "FLATTEN" or not security.verify_totp(payload.totp_code):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Emergency confirmation failed")
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     orders = await service.emergency_flatten()
     await repo.audit(
         actor=user.username,
@@ -529,8 +529,8 @@ async def reduce_position(
     service: Controller,
     repo: Repo,
 ) -> dict[str, Any]:
-    if payload.confirmation != "REDUCE" or not security.verify_totp(payload.totp_code):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Reduce confirmation failed")
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
         order = await service.reduce_position(
             payload.position_id, payload.fraction, payload.operation_id

@@ -10,7 +10,7 @@ it('traps focus, closes with Escape, and announces errors', () => {
       title="确认操作"
       body="请确认"
       confirmLabel="执行"
-      requireTotp
+      requirePassword
       error="操作失败"
       onClose={onClose}
       onConfirm={vi.fn()}
