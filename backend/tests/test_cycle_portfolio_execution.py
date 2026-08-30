@@ -63,6 +63,7 @@ class FakeExchange:
     def __init__(self, remaining):
         self.remaining = remaining
         self.protection_quantities: list[Decimal] = []
+        self.protection_intents: list[ExecutionIntent] = []
         self.canceled: list[str] = []
 
     async def get_positions(self):
@@ -71,7 +72,8 @@ class FakeExchange:
     async def upsert_protection(
         self, intent: ExecutionIntent, filled_quantity: Decimal, average_price: Decimal
     ):
-        del intent, average_price
+        del average_price
+        self.protection_intents.append(intent)
         self.protection_quantities.append(filled_quantity)
         return [_order("STOP_MARKET"), _order("TAKE_PROFIT_MARKET")]
 
@@ -127,7 +129,36 @@ async def test_partial_reduce_refreshes_protection_for_remaining_quantity() -> N
 
     assert len(result) == 3
     assert exchange.protection_quantities == [Decimal("5")]
+    assert exchange.protection_intents[0].tp2_price == Decimal("106")
     assert exchange.canceled == []
+
+
+@pytest.mark.asyncio
+async def test_partial_close_preserves_existing_take_profit_targets() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("10"),
+        tp1_price=Decimal("102"),
+        tp2_price=Decimal("108"),
+    )
+    remaining = current.model_copy(update={"quantity": Decimal("5")})
+    action = _reduce_action(current).model_copy(
+        update={
+            "action": PortfolioPlanActionType.CLOSE,
+            "target_quantity": Decimal("0"),
+            "quantity_delta": Decimal("10"),
+            "target_price": None,
+        }
+    )
+    exchange = FakeExchange(remaining)
+
+    await _cycle(exchange)._execute_portfolio_action(
+        action, {current.symbol: current}, _decision()
+    )
+
+    assert exchange.protection_intents[0].tp1_price == Decimal("102")
+    assert exchange.protection_intents[0].tp2_price == Decimal("108")
 
 
 @pytest.mark.asyncio

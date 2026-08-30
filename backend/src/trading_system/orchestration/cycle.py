@@ -999,10 +999,13 @@ class TradingCycle:
         risk = abs(entry - (action.stop_price or position.stop_price))
         if risk <= 0:
             risk = max(entry * Decimal("0.001"), Decimal("0.00000001"))
-        target = action.target_price or (
+        target = action.target_price or position.tp2_price or (
             entry + risk * Decimal("2")
             if position.side == PositionSide.LONG
             else entry - risk * Decimal("2")
+        )
+        tp1 = position.tp1_price or (
+            entry + risk if position.side == PositionSide.LONG else entry - risk
         )
         intent_id = uuid5(
             NAMESPACE_URL,
@@ -1018,7 +1021,7 @@ class TradingCycle:
             entry_min=entry,
             entry_max=entry,
             stop_price=action.stop_price or position.stop_price,
-            tp1_price=(entry + risk if position.side == PositionSide.LONG else entry - risk),
+            tp1_price=tp1,
             tp2_price=target,
             leverage=self.settings.max_leverage,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
