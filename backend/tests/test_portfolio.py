@@ -94,6 +94,23 @@ def test_compiler_allocates_new_candidate_under_hard_risk_cap() -> None:
     assert plan.approved_risk_usdt <= plan.risk_cap_usdt
 
 
+def test_compiler_rejects_target_when_available_balance_is_insufficient() -> None:
+    account = context().account.model_copy(update={"available_balance": Decimal("0")})
+    plan = PortfolioCompiler().compile(
+        decision(allocation()),
+        snapshots={"BTCUSDT": snapshot()},
+        account=account,
+        positions=[],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    assert plan.status == PortfolioPlanStatus.REJECTED
+    assert plan.actions[0].action == PortfolioPlanActionType.REJECTED
+    assert "available_balance_insufficient" in plan.actions[0].reasons
+
+
 def test_compiler_closes_existing_position_when_target_is_flat() -> None:
     current = position(symbol="BTCUSDT", side=PositionSide.LONG)
     flat = allocation(

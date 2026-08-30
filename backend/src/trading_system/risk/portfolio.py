@@ -499,6 +499,14 @@ class PortfolioCompiler:
         capital_base = min(account.equity, limits.capital_limit_usdt)
         if projected_margin > capital_base * limits.max_margin_pct:
             return "margin_limit_reached"
+        # Check free balance independently from the configured margin ratio.
+        # This lets reductions earlier in the same plan release capacity before
+        # a later increase and prevents avoidable exchange-side rejections.
+        incremental_margin = max(
+            Decimal("0"), projected_margin - account.total_margin_used
+        )
+        if incremental_margin > account.available_balance:
+            return "available_balance_insufficient"
         return None
 
     @staticmethod

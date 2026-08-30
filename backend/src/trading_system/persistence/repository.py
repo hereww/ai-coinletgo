@@ -57,6 +57,7 @@ REASON_LABELS_ZH: dict[str, str] = {
     "confidence_below_minimum": "置信度低于最低要求",
     "entry_direction_not_allowed": "开仓方向不在当前策略允许范围",
     "position_count_limit_reached": "已达到最大持仓数量",
+    "available_balance_insufficient": "账户可用余额不足",
     "same_direction_limit_reached": "已达到同方向持仓上限",
     "existing_symbol_position": "该合约已有持仓，系统不会重复开仓",
     "net_reward_risk_below_minimum": "净盈亏比低于最低要求",
