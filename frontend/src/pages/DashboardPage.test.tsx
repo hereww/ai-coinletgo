@@ -143,7 +143,7 @@ describe('DashboardPage', () => {
       mode: 'RECONCILIATION_REQUIRED',
       cycle_status: {
         state: 'BLOCKED_RECONCILIATION',
-        detail: '仓位对账待人工接管，本轮未调用模型',
+        detail: '仓位对账待确认，本轮未调用模型',
         started_at: null,
         finished_at: null,
         snapshots: 0,
@@ -156,9 +156,9 @@ describe('DashboardPage', () => {
     })
     renderPage()
 
-    const analyze = await screen.findByRole('button', { name: '接管后再分析' })
+    const analyze = await screen.findByRole('button', { name: '完成仓位对账后再分析' })
     expect(analyze).toBeDisabled()
-    expect(screen.getByText('需先完成仓位接管，本轮未调用模型')).toBeInTheDocument()
+    expect(screen.getByText('需先完成仓位对账，本轮未调用模型')).toBeInTheDocument()
     expect(apiMock.runCycle).not.toHaveBeenCalled()
   })
 

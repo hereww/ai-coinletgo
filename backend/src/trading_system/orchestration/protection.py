@@ -212,7 +212,7 @@ class PositionProtectionMonitor:
             )
             await self.notifier.send(
                 "无保护仓位待人工处置",
-                f"检测到 {len(unsafe)} 个无交易所硬止损仓位，已冻结新仓，请人工接管或清仓。",
+                f"检测到 {len(unsafe)} 个无交易所硬止损仓位，已冻结新仓，请完成仓位对账或清仓。",
             )
             return
 

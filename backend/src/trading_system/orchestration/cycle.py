@@ -297,7 +297,7 @@ class TradingCycle:
         # the dashboard state unambiguously about reconciliation rather than
         # presenting a misleading model interruption.
         if mode == SystemMode.RECONCILIATION_REQUIRED:
-            result.detail = "仓位对账待人工接管，本轮未调用模型"
+            result.detail = "仓位对账待确认，本轮未调用模型"
             return result
         exchange_healthy, exchange_detail = await self.exchange.health_check()
         if not exchange_healthy:
@@ -319,7 +319,7 @@ class TradingCycle:
             )
             await self.notifier.send(
                 "无保护仓位待人工处置",
-                f"检测到 {len(unsafe_positions)} 个无硬止损仓位，已冻结新仓，请人工接管或清仓。",
+                f"检测到 {len(unsafe_positions)} 个无硬止损仓位，已冻结新仓，请完成仓位对账或清仓。",
             )
             result.detail = "unprotected positions require reconciliation"
             return result

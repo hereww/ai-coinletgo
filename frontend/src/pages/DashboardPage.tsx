@@ -69,7 +69,7 @@ export default function DashboardPage() {
     MODEL_UNAVAILABLE: '模型不可用，本轮未增险',
     MODEL_TIMEOUT: '模型响应超时，本轮未增险',
     MODEL_THROTTLED: '模型节流中，本轮未重复调用',
-    BLOCKED_RECONCILIATION: '需先完成仓位接管，本轮未调用模型',
+    BLOCKED_RECONCILIATION: '需先完成仓位对账，本轮未调用模型',
     EXCHANGE_UNAVAILABLE: '交易所暂不可用，本轮未调用模型',
     WORKER_BUSY: '上一轮仍在执行，本轮未重复启动',
     WORKER_INTERRUPTED: 'Worker 中断，本轮未增险',
@@ -84,8 +84,8 @@ export default function DashboardPage() {
         <div className="command-row">
           <Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => dashboard.refetch()} aria-label="刷新数据">刷新</Button>
           {data.environment === 'testnet' ? <Button icon={<Plus size={15} />} onClick={() => setDialog('manual-entry')} disabled={!data.health.ready || data.mode !== 'TESTNET'}>手动开仓</Button> : null}
-          <Button icon={<Play size={15} />} onClick={() => runCycle.mutate({ mode: data.mode, environment: data.environment })} disabled={!data.health.ready || runCycle.isPending || reconciliationBlocked}>{runCycle.isPending ? '分析执行中...' : reconciliationBlocked ? '接管后再分析' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
-          {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('reconcile')}>接管仓位</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => resume.mutate()} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
+          <Button icon={<Play size={15} />} onClick={() => runCycle.mutate({ mode: data.mode, environment: data.environment })} disabled={!data.health.ready || runCycle.isPending || reconciliationBlocked}>{runCycle.isPending ? '分析执行中...' : reconciliationBlocked ? '完成仓位对账后再分析' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
+          {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('reconcile')}>确认仓位状态</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => resume.mutate()} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
           {data.environment === 'live' ? <Button icon={<LockKeyhole size={15} />} onClick={() => setDialog('unlock')}>解锁实盘</Button> : null}
           <Button variant="danger" icon={<OctagonAlert size={15} />} onClick={() => setDialog('flatten')}>紧急清仓</Button>
         </div>
@@ -114,7 +114,7 @@ export default function DashboardPage() {
 
       <ConfirmDialog open={dialog === 'flatten'} title="紧急清仓" body="系统将暂停新开仓，并以市价关闭专用子账户中的全部受管仓位。" confirmLabel="立即清仓" requirePassword danger busy={flatten.isPending} error={flatten.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => flatten.mutate(password)} />
       <ConfirmDialog open={dialog === 'unlock'} title="解锁实盘" body="只有在币安、模型、数据库、时间同步和认证健康检查全部通过时，实盘才会启用。" confirmLabel="检查并解锁" requirePassword busy={unlock.isPending} error={unlock.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => unlock.mutate(password)} />
-      <ConfirmDialog open={dialog === 'reconcile'} title="接管交易所仓位" body="系统会重新读取币安仓位。只有每个仓位都存在可识别的交易所端硬止损时，才会接受当前状态。" confirmLabel="验证并接管" requirePassword busy={reconcile.isPending} error={reconcile.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => reconcile.mutate(password)} />
+      <ConfirmDialog open={dialog === 'reconcile'} title="确认交易所仓位" body="系统会重新读取币安仓位。只有每个仓位都存在可识别的交易所端硬止损时，才会接受当前状态。" confirmLabel="验证并确认" requirePassword busy={reconcile.isPending} error={reconcile.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => reconcile.mutate(password)} />
       <ManualEntryDialog open={dialog === 'manual-entry'} onClose={() => setDialog(null)} />
     </>
   )
