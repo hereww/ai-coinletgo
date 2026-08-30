@@ -745,11 +745,11 @@ class BinanceUSDMarketClient(ExchangeGateway):
     async def upsert_protection(
         self, intent: ExecutionIntent, filled_quantity: Decimal, average_price: Decimal
     ) -> list[OrderState]:
-        del average_price
         filters = await self.get_filters(intent.symbol)
         q1 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         q2 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         close_side = "SELL" if intent.side == PositionSide.LONG else "BUY"
+        tp1_price = self._tp1_for_fill(intent, average_price)
         existing = self._algo_orders(
             await self._request(
                 "GET", "/fapi/v1/openAlgoOrders", {"symbol": intent.symbol}, signed=True
@@ -766,7 +766,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         ]
         if q1 >= filters.min_quantity:
             specs.append(
-                (f"frc_{tranche_suffix}_t1", "TAKE_PROFIT_MARKET", intent.tp1_price, False)
+                (f"frc_{tranche_suffix}_t1", "TAKE_PROFIT_MARKET", tp1_price, False)
             )
         if q2 >= filters.min_quantity:
             specs.append(
@@ -849,6 +849,28 @@ class BinanceUSDMarketClient(ExchangeGateway):
             )
         self._invalidate_position_cache()
         return orders
+
+    @staticmethod
+    def _tp1_for_fill(intent: ExecutionIntent, average_price: Decimal) -> Decimal:
+        """Derive the 1R tranche from the actual weighted fill price.
+
+        A limit entry may fill anywhere inside the approved interval.  Using a
+        fixed interval anchor for TP1 can make the first tranche immediately
+        trigger when the fill is near the opposite edge.  The hard stop and
+        model-provided TP2 remain unchanged; only the mechanical 1R target
+        follows the real fill price.
+        """
+
+        if average_price <= 0:
+            return intent.tp1_price
+        risk_distance = abs(average_price - intent.stop_price)
+        if risk_distance <= 0:
+            return intent.tp1_price
+        if intent.side == PositionSide.LONG:
+            candidate = average_price + risk_distance
+            return candidate if candidate < intent.tp2_price else intent.tp1_price
+        candidate = average_price - risk_distance
+        return candidate if candidate > intent.tp2_price else intent.tp1_price
 
     async def close_position_market(self, position: PositionState, reason: str) -> OrderState:
         return await self.close_position_quantity_market(position, position.quantity, reason)

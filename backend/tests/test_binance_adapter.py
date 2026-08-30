@@ -544,6 +544,75 @@ async def test_protection_orders_use_hedge_side_and_close_position_stop(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_protection_first_target_follows_actual_fill_price(tmp_path: object) -> None:
+    submitted: list[httpx.QueryParams] = []
+    algo_orders: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "filters": [
+                                {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                                {
+                                    "filterType": "LOT_SIZE",
+                                    "stepSize": "0.1",
+                                    "minQty": "0.1",
+                                },
+                                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                            ],
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/fapi/v1/openAlgoOrders":
+            return httpx.Response(200, json={"orders": algo_orders})
+        if request.url.path == "/fapi/v1/algoOrder" and request.method == "POST":
+            submitted.append(request.url.params)
+            row = {
+                "algoId": len(submitted),
+                "clientAlgoId": request.url.params["clientAlgoId"],
+                "symbol": request.url.params["symbol"],
+                "side": request.url.params["side"],
+                "positionSide": request.url.params["positionSide"],
+                "orderType": request.url.params["type"],
+                "algoStatus": "NEW",
+                "quantity": request.url.params.get("quantity", "0"),
+                "triggerPrice": request.url.params["triggerPrice"],
+                "closePosition": request.url.params.get("closePosition", "false"),
+            }
+            algo_orders.append(row)
+            return httpx.Response(200, json=row)
+        raise AssertionError(request.url)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    intent = ExecutionIntent(
+        signal_id="1fef93c8-f2d0-4d45-95f0-e5506fd7fa53",
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("1"),
+        limit_price=Decimal("100"),
+        entry_min=Decimal("99.5"),
+        entry_max=Decimal("100.5"),
+        stop_price=Decimal("99"),
+        tp1_price=Decimal("101"),
+        tp2_price=Decimal("105"),
+        leverage=3,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    try:
+        await client.upsert_protection(intent, Decimal("1"), Decimal("100.5"))
+    finally:
+        await client.close()
+
+    assert submitted[1]["triggerPrice"] == "102"
+
+
+@pytest.mark.asyncio
 async def test_protection_upsert_is_idempotent_and_cancels_stale_algo_orders(
     tmp_path: object,
 ) -> None:
