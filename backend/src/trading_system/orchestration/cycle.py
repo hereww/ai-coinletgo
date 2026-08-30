@@ -358,7 +358,13 @@ class TradingCycle:
             await self._trip_breaker(breaker_reasons)
             mode = SystemMode.RISK_HALTED
             result.detail = "risk circuit breaker halted new entries"
-            return result
+            # Portfolio-v1 may still need a model-directed CLOSE, REDUCE, or
+            # TIGHTEN_STOP for existing protected positions.  Continue the
+            # market/portfolio path in RISK_HALTED mode; PortfolioCompiler
+            # blocks every OPEN/ADD action in that mode.  Legacy signal-v1 has
+            # no equivalent portfolio target, so it remains fail-closed.
+            if not (self.settings.portfolio_strategy_enabled and positions):
+                return result
 
         selected_symbols = {symbol.upper() for symbol in self.settings.entry_symbols}
         logger.info(
