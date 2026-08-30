@@ -166,7 +166,7 @@ class ManualEntryRequest(BaseModel):
     stop_distance_pct: Decimal = Field(ge=Decimal("0.10"), le=Decimal("10"))
     tp1_r: Decimal = Field(ge=Decimal("0.5"), le=Decimal("10"))
     tp2_r: Decimal = Field(ge=Decimal("2"), le=Decimal("12"))
-    confirmation: str = Field(default="", max_length=80)
+    password: str = Field(default="", max_length=256)
 
     @field_validator("symbol")
     @classmethod

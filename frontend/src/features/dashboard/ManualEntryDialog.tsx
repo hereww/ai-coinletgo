@@ -31,6 +31,7 @@ export function ManualEntryDialog({ open, onClose }: Props) {
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const [draft, setDraft] = useState<ManualEntryDraft>(initialDraft)
   const [confirmed, setConfirmed] = useState(false)
+  const [password, setPassword] = useState('')
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'assistant', content: '告诉我你想交易的方向或顾虑。我会结合测试网行情检查参数，但不会替你直接下单。' },
@@ -41,6 +42,7 @@ export function ManualEntryDialog({ open, onClose }: Props) {
     if (!open) return
     previousFocusRef.current = document.activeElement as HTMLElement | null
     setConfirmed(false)
+    setPassword('')
     window.setTimeout(() => dialogRef.current?.focus(), 0)
     return () => previousFocusRef.current?.focus()
   }, [open])
@@ -60,7 +62,7 @@ export function ManualEntryDialog({ open, onClose }: Props) {
   }, [config.data, draft.leverage, open])
 
   const entry = useMutation({
-    mutationFn: () => api.manualEntry({ ...draft, operation_id: crypto.randomUUID() }),
+    mutationFn: () => api.manualEntry({ ...draft, operation_id: crypto.randomUUID(), password }),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -90,6 +92,7 @@ export function ManualEntryDialog({ open, onClose }: Props) {
     entry.reset()
     advice.reset()
     setConfirmed(false)
+    setPassword('')
   }
   const ask = (event: FormEvent) => {
     event.preventDefault()
@@ -185,14 +188,19 @@ export function ManualEntryDialog({ open, onClose }: Props) {
             ) : null}
 
             {!entry.data ? (
-              <label className="manual-confirm-row">
-                <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
-                <span>我确认这是测试网订单，并接受系统按硬风控自动计算数量。</span>
-              </label>
+              <>
+                <label className="field-label manual-password-field">操作密码
+                  <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
+                </label>
+                <label className="manual-confirm-row">
+                  <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+                  <span>我确认这是测试网订单，并接受系统按硬风控自动计算数量。</span>
+                </label>
+              </>
             ) : null}
             <div className="manual-entry-actions">
               <Button type="button" onClick={onClose} disabled={entry.isPending}>{entry.data ? '完成' : '取消'}</Button>
-              {!entry.data ? <Button type="button" variant="primary" icon={<ShieldCheck size={15} />} disabled={!confirmed || entry.isPending} onClick={() => entry.mutate()}>{entry.isPending ? '提交并挂保护单...' : '确认测试网开仓'}</Button> : null}
+              {!entry.data ? <Button type="button" variant="primary" icon={<ShieldCheck size={15} />} disabled={!confirmed || !password || entry.isPending} onClick={() => entry.mutate()}>{entry.isPending ? '提交并挂保护单...' : '确认测试网开仓'}</Button> : null}
             </div>
           </div>
 

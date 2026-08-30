@@ -273,6 +273,7 @@
 .manual-risk-card span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
 .manual-risk-card strong { color: var(--text-section); font-size: 10px; }
 .manual-leverage-note { margin: 10px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.manual-password-field { margin-top: 18px; }
 .manual-order-panel > .inline-error, .manual-order-panel > .success-note, .manual-entry-success { margin-top: 14px; }
 .manual-confirm-row { display: flex; align-items: flex-start; gap: 9px; margin-top: 18px; padding: 12px; border: 1px solid var(--amber-border); border-radius: 6px; background: var(--amber-soft); color: var(--text-subtle); font-size: 10px; line-height: 1.5; }
 .manual-confirm-row input { margin-top: 2px; accent-color: var(--green); }

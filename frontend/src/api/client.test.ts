@@ -38,3 +38,26 @@ it('does not loop the login bootstrap when auth status is unauthorized', async (
   await expect(api.me()).rejects.toMatchObject({ status: 401 })
   expect(unauthorized).not.toHaveBeenCalled()
 })
+
+it('sends the operator password for manual testnet entry', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  }))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await api.manualEntry({
+    operation_id: 'manual-entry-123',
+    symbol: 'BTCUSDT',
+    side: 'LONG',
+    leverage: 2,
+    stop_distance_pct: 1,
+    tp1_r: 1,
+    tp2_r: 2,
+    password: 'operator-password',
+  })
+
+  const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+  expect(JSON.parse(String(init.body))).toMatchObject({ password: 'operator-password' })
+  expect(JSON.parse(String(init.body))).not.toHaveProperty('confirmation')
+})

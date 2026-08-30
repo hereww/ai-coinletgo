@@ -557,11 +557,12 @@ async def manual_entry(
     payload: ManualEntryRequest,
     request: Request,
     user: MutatingUser,
+    security: Security,
     service: Controller,
     repo: Repo,
 ) -> dict[str, Any]:
-    if payload.confirmation != "OPEN TESTNET POSITION":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Manual entry confirmation failed")
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
         result = await service.manual_entry(
             operation_id=payload.operation_id,

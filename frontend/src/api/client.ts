@@ -120,10 +120,10 @@ export const api = {
         password,
       }),
     }),
-  manualEntry: (payload: ManualEntryDraft & { operation_id: string }) =>
+  manualEntry: (payload: ManualEntryDraft & { operation_id: string; password: string }) =>
     request<ManualEntryResult>('/api/v1/actions/manual-entry', {
       method: 'POST',
-      body: JSON.stringify({ ...payload, confirmation: 'OPEN TESTNET POSITION' }),
+      body: JSON.stringify(payload),
     }),
   manualEntryAdvice: (payload: ManualEntryDraft & { messages: Array<{ role: 'user' | 'assistant'; content: string }> }) =>
     request<ManualEntryAdvice>('/api/v1/actions/manual-entry/advice', {

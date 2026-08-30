@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from trading_system.api.schemas import (
     ConfigUpdateRequest,
     ManualEntryAdviceRequest,
+    ManualEntryRequest,
     ModelProfileSelectRequest,
     ModelRelayUpdateRequest,
     ReplayRequest,
@@ -169,6 +170,18 @@ def test_manual_advice_uses_the_same_target_ordering_as_manual_entry() -> None:
         messages=[{"role": "user", "content": "给出ETH开仓建议"}],
     )
     assert request.symbol == "ETHUSDT"
+
+    entry = ManualEntryRequest(
+        operation_id="manual-entry-123",
+        symbol="BTCUSDT",
+        side="LONG",
+        leverage=2,
+        stop_distance_pct="1",
+        tp1_r="1",
+        tp2_r="2",
+        password="operator-password",
+    )
+    assert entry.password == "operator-password"
 
     with pytest.raises(ValidationError, match="tp2_r cannot be below tp1_r"):
         ManualEntryAdvice(
