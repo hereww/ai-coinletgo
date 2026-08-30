@@ -141,6 +141,38 @@ def test_compiler_defers_same_cycle_reversal() -> None:
     assert "same_cycle_reversal_deferred" in plan.actions[0].reasons
 
 
+def test_compiler_refreshes_protection_when_target_price_changes() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        tp1_price=Decimal("102"),
+        tp2_price=Decimal("104"),
+        initial_risk_usdt=Decimal("2"),
+    )
+    updated = allocation(
+        "BTCUSDT",
+        allocation_fraction=Decimal("0.27"),
+        stop_price=Decimal("98"),
+        target_price=Decimal("108"),
+    )
+
+    plan = PortfolioCompiler().compile(
+        decision(updated),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    assert plan.actions[0].action == PortfolioPlanActionType.TIGHTEN_STOP
+    assert "take_profit_updated" in plan.actions[0].reasons
+
+
 def test_compiler_fails_closed_for_expired_decision() -> None:
     created_at = datetime.now(UTC) - timedelta(minutes=15)
     expired = decision(

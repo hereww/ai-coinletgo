@@ -276,20 +276,29 @@ class BinanceUSDMarketClient(ExchangeGateway):
         for batch in algo_batches:
             open_algo_orders.extend(self._algo_orders(batch))
         protection_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        take_profit_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for order in self._algo_orders(open_algo_orders):
             order_type = str(order.get("orderType") or order.get("type") or "")
             client_id = self._algo_client_id(order)
             if (
                 not client_id.startswith("frc_")
-                or order_type != "STOP_MARKET"
                 or not self._algo_active(order)
-                or str(order.get("closePosition", "")).lower() != "true"
                 or order.get("positionSide") not in {"LONG", "SHORT"}
-                or Decimal(str(order.get("triggerPrice") or order.get("stopPrice") or "0")) <= 0
             ):
                 continue
+            trigger = Decimal(
+                str(order.get("triggerPrice") or order.get("stopPrice") or "0")
+            )
+            if trigger <= 0:
+                continue
             key = (str(order["symbol"]), str(order["positionSide"]))
-            protection_by_key.setdefault(key, []).append(order)
+            if (
+                order_type == "STOP_MARKET"
+                and str(order.get("closePosition", "")).lower() == "true"
+            ):
+                protection_by_key.setdefault(key, []).append(order)
+            elif order_type in {"TAKE_PROFIT", "TAKE_PROFIT_MARKET"}:
+                take_profit_by_key.setdefault(key, []).append(order)
         positions: list[PositionState] = []
         for row in rows:
             quantity = abs(Decimal(row["positionAmt"]))
@@ -305,6 +314,21 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 if protected
                 else entry
             )
+            take_profits = sorted(
+                {
+                    Decimal(
+                        str(
+                            order.get("triggerPrice")
+                            or order.get("stopPrice")
+                            or "0"
+                        )
+                    )
+                    for order in take_profit_by_key.get((row["symbol"], side.value), [])
+                },
+                reverse=side == PositionSide.SHORT,
+            )
+            tp1 = take_profits[0] if take_profits else None
+            tp2 = take_profits[1] if len(take_profits) > 1 else tp1
             risk_per_unit = max(Decimal("0.00000001"), abs(entry - stop))
             direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
             positions.append(
@@ -317,6 +341,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
                     entry_price=entry,
                     mark_price=mark,
                     stop_price=stop,
+                    tp1_price=tp1,
+                    tp2_price=tp2,
                     original_stop_price=stop,
                     initial_risk_usdt=quantity * risk_per_unit,
                     unrealized_pnl=Decimal(row["unRealizedProfit"]),

@@ -24,6 +24,8 @@ export interface Position {
   entry_price: string
   mark_price: string
   stop_price: string
+  tp1_price?: string | null
+  tp2_price?: string | null
   unrealized_pnl: string
   current_r: string
   protected: boolean

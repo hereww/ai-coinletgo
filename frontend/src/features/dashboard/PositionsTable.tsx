@@ -8,9 +8,9 @@ export function PositionsTable({ positions, onReduce }: { positions: Position[];
   return (
     <div className="table-scroll">
       <table className="data-table positions-table">
-        <thead><tr><th>合约</th><th>方向</th><th>数量</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th><th>止损</th><th>当前 R</th><th>保护</th><th aria-label="操作" /></tr></thead>
+        <thead><tr><th>合约</th><th>方向</th><th>数量</th><th>开仓均价</th><th>标记价格</th><th>未实现盈亏</th><th>止损</th><th>止盈1</th><th>止盈2</th><th>当前 R</th><th>保护</th><th aria-label="操作" /></tr></thead>
         <tbody>
-          {positions.length === 0 ? <tr><td colSpan={10} className="empty-cell">当前没有持仓</td></tr> : positions.map((position) => {
+          {positions.length === 0 ? <tr><td colSpan={12} className="empty-cell">当前没有持仓</td></tr> : positions.map((position) => {
             const pnl = Number(position.unrealized_pnl)
             return (
               <tr key={position.position_id}>
@@ -21,6 +21,8 @@ export function PositionsTable({ positions, onReduce }: { positions: Position[];
                 <td className="mono">{amount.format(Number(position.mark_price))}</td>
                 <td className={`mono ${pnl >= 0 ? 'positive' : 'negative'}`}>{pnl >= 0 ? '+' : ''}{amount.format(pnl)}</td>
                 <td className="mono">{amount.format(Number(position.stop_price))}</td>
+                <td className="mono">{position.tp1_price ? amount.format(Number(position.tp1_price)) : '—'}</td>
+                <td className="mono">{position.tp2_price ? amount.format(Number(position.tp2_price)) : '—'}</td>
                 <td className="mono">{Number(position.current_r).toFixed(2)}R</td>
                 <td>{position.protected ? <span className="protection good"><ShieldCheck size={15} />已保护</span> : <span className="protection bad"><XCircle size={15} />异常</span>}</td>
                 <td>{onReduce ? <Button variant="ghost" onClick={() => onReduce(position)}>减仓</Button> : null}</td>
@@ -32,4 +34,3 @@ export function PositionsTable({ positions, onReduce }: { positions: Position[];
     </div>
   )
 }
-

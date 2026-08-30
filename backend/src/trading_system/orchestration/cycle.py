@@ -836,8 +836,17 @@ class TradingCycle:
         if action.action == PortfolioPlanActionType.TIGHTEN_STOP:
             if position is None or action.stop_price is None:
                 raise ExchangeError("portfolio tighten-stop position is missing")
+            protection_intent = self._protection_intent(
+                action,
+                position,
+                decision_id=decision.decision_id,
+            )
             return self._tag_portfolio_orders(
-                [await self.exchange.tighten_stop(position, action.stop_price)],
+                await self.exchange.upsert_protection(
+                    protection_intent,
+                    position.quantity,
+                    position.entry_price,
+                ),
                 action,
                 decision,
             )
@@ -857,29 +866,12 @@ class TradingCycle:
                 f"portfolio-{decision.decision_id}-{action.action_id}",
                 price,
             )
-            if action.action == PortfolioPlanActionType.REDUCE:
-                refreshed = await self.exchange.get_positions()
-                remaining = next(
-                    (
-                        item
-                        for item in refreshed
-                        if item.symbol == position.symbol and item.side == position.side
-                    ),
-                    None,
-                )
-                if remaining is not None and remaining.quantity > 0:
-                    protection_intent = self._protection_intent(
-                        action,
-                        remaining,
-                        decision_id=decision.decision_id,
-                    )
-                    orders.extend(
-                        await self.exchange.upsert_protection(
-                            protection_intent,
-                            remaining.quantity,
-                            remaining.entry_price,
-                        )
-                    )
+            protection_orders = await self._refresh_after_exit(
+                position,
+                action,
+                decision_id=decision.decision_id,
+            )
+            orders.extend(protection_orders)
             return self._tag_portfolio_orders(orders, action, decision)
         if action.action in {PortfolioPlanActionType.OPEN, PortfolioPlanActionType.ADD}:
             if action.side is None or action.stop_price is None or action.target_price is None:
@@ -940,6 +932,46 @@ class TradingCycle:
                     )
             return self._tag_portfolio_orders(orders, action, decision)
         raise ExchangeError(f"unsupported portfolio action: {action.action}")
+
+    async def _refresh_after_exit(
+        self,
+        position: PositionState,
+        action: Any,
+        *,
+        decision_id: Any,
+    ) -> list[Any]:
+        """Reconcile all remaining protection after a close or reduction.
+
+        ExitExecutionManager cancels stale take-profits, but a limit/market
+        close can be partially filled.  Re-reading the exchange position and
+        upserting protection with the remaining quantity prevents oversized
+        TP orders and guarantees the hard stop still covers the remainder.
+        """
+
+        refreshed = await self.exchange.get_positions()
+        remaining = next(
+            (
+                item
+                for item in refreshed
+                if item.symbol == position.symbol
+                and item.side == position.side
+                and item.quantity > 0
+            ),
+            None,
+        )
+        if remaining is None:
+            await self.exchange.cancel_position_protection(position)
+            return []
+        protection_intent = self._protection_intent(
+            action,
+            remaining,
+            decision_id=decision_id,
+        )
+        return await self.exchange.upsert_protection(
+            protection_intent,
+            remaining.quantity,
+            remaining.entry_price,
+        )
 
     @staticmethod
     def _tag_portfolio_orders(

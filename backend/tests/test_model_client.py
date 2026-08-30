@@ -477,6 +477,35 @@ async def test_deep_health_executes_schema_probe(tmp_path: object) -> None:
 
 
 @pytest.mark.asyncio
+async def test_deep_health_uses_portfolio_schema_when_enabled(tmp_path: object) -> None:
+    captured: list[dict[str, object]] = []
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+    portfolio_output = {
+        "market_regime": "UNCERTAIN",
+        "portfolio_risk_budget_fraction": 0,
+        "allocations": [],
+        "summary": "组合探针",
+        "expires_at": expires_at.isoformat(),
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"output_text": json.dumps(portfolio_output)})
+
+    settings = model_settings(tmp_path)
+    settings.portfolio_strategy_enabled = True
+    client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
+    try:
+        healthy, detail = await client.health_check(deep=True)
+    finally:
+        await client.close()
+
+    assert healthy is True
+    assert "probe passed" in detail
+    assert captured[0]["text"]["format"]["name"] == "portfolio_decision"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
 async def test_base_url_with_v1_suffix_does_not_duplicate_path(tmp_path: object) -> None:
     requested_paths: list[str] = []
 

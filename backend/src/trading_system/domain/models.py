@@ -181,6 +181,12 @@ class PositionState(BaseModel):
     entry_price: PositiveDecimal
     mark_price: PositiveDecimal
     stop_price: PositiveDecimal
+    # The exchange-side protection monitor can recover both take-profit
+    # tranches.  Keeping these values with the position lets the portfolio
+    # compiler detect a model target change and refresh protection instead of
+    # treating the allocation as a no-op.
+    tp1_price: PositiveDecimal | None = None
+    tp2_price: PositiveDecimal | None = None
     original_stop_price: PositiveDecimal | None = None
     initial_risk_usdt: PositiveDecimal
     unrealized_pnl: Decimal = Decimal("0")

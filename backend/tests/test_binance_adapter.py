@@ -853,6 +853,27 @@ async def test_get_positions_reads_algo_protection_only(tmp_path: object) -> Non
                             "triggerPrice": "99",
                             "closePosition": True,
                         }
+                        ,
+                        {
+                            "algoId": 8,
+                            "clientAlgoId": "frc_abc_t1",
+                            "symbol": "BTCUSDT",
+                            "side": "SELL",
+                            "positionSide": "LONG",
+                            "orderType": "TAKE_PROFIT_MARKET",
+                            "algoStatus": "NEW",
+                            "triggerPrice": "103",
+                        },
+                        {
+                            "algoId": 9,
+                            "clientAlgoId": "frc_abc_t2",
+                            "symbol": "BTCUSDT",
+                            "side": "SELL",
+                            "positionSide": "LONG",
+                            "orderType": "TAKE_PROFIT_MARKET",
+                            "algoStatus": "NEW",
+                            "triggerPrice": "106",
+                        }
                     ]
                 },
             )
@@ -865,6 +886,8 @@ async def test_get_positions_reads_algo_protection_only(tmp_path: object) -> Non
         await client.close()
     assert positions[0].protected is True
     assert positions[0].stop_price == Decimal("99")
+    assert positions[0].tp1_price == Decimal("103")
+    assert positions[0].tp2_price == Decimal("106")
 
 
 @pytest.mark.asyncio

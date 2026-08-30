@@ -302,6 +302,16 @@ class PortfolioCompiler:
         delta_risk = abs(target_risk - current_risk)
         deadband = risk_cap * limits.portfolio_rebalance_deadband_fraction
         tighten = stop != position.stop_price
+        # A portfolio decision may keep quantity unchanged while moving the
+        # final take-profit target.  Treat that as a protection update so the
+        # execution layer re-compiles both TP tranches on the exchange.
+        target_changed = (
+            allocation.target_price is not None
+            and (
+                position.tp2_price is None
+                or allocation.target_price != position.tp2_price
+            )
+        )
         if (
             target_quantity == position.quantity
             or (
@@ -310,18 +320,29 @@ class PortfolioCompiler:
                 and delta_risk < deadband
             )
         ):
+            if tighten or target_changed:
+                reasons = []
+                if tighten:
+                    reasons.append("hard_stop_tightened")
+                if target_changed:
+                    reasons.append("take_profit_updated")
+                return self._action(
+                    allocation,
+                    PortfolioPlanActionType.TIGHTEN_STOP,
+                    position,
+                    target_quantity=position.quantity,
+                    target_risk=current_risk,
+                    stop=stop,
+                    reasons=reasons,
+                )
             return self._action(
                 allocation,
-                PortfolioPlanActionType.TIGHTEN_STOP if tighten else PortfolioPlanActionType.HOLD,
+                PortfolioPlanActionType.HOLD,
                 position,
                 target_quantity=position.quantity,
                 target_risk=current_risk,
                 stop=stop,
-                reasons=[
-                    "target_inside_rebalance_deadband"
-                    if not tighten
-                    else "hard_stop_tightened"
-                ],
+                reasons=["target_inside_rebalance_deadband"],
             )
         if target_quantity < position.quantity:
             return self._action(

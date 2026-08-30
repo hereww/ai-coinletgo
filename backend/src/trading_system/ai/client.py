@@ -598,7 +598,15 @@ class ResponsesModelClient:
         if not deep:
             return True, "configured; schema probe required for live unlock"
         try:
-            await self.analyze([], [], datetime.now(UTC) + timedelta(minutes=15))
+            probe_expires_at = datetime.now(UTC) + timedelta(minutes=15)
+            if self.settings.portfolio_strategy_enabled:
+                # The live strategy entry point is Portfolio-v1.  Probing only
+                # the legacy signal schema can report a healthy model relay
+                # while the portfolio contract is broken, leaving the worker
+                # to fail every cycle after the safety gates pass.
+                await self.analyze_portfolio([], [], probe_expires_at)
+            else:
+                await self.analyze([], [], probe_expires_at)
         except Exception as error:
             return False, f"schema probe failed: {error}"
         return True, "Responses API structured-output probe passed"
