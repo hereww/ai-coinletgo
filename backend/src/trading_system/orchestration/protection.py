@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import NAMESPACE_URL, uuid5
 
 from redis.asyncio import Redis
 
 from trading_system.config import Settings
 from trading_system.domain.enums import PositionSide, SystemMode
-from trading_system.domain.models import MarketSnapshot, PositionState
+from trading_system.domain.models import ExecutionIntent, MarketSnapshot, PositionState
 from trading_system.exchange.base import ExchangeError
 from trading_system.exchange.binance import BinanceUSDMarketClient
 from trading_system.notifications.telegram import TelegramNotifier
@@ -216,6 +218,77 @@ class PositionProtectionMonitor:
             )
             return
 
+        # A hard stop is the last-resort safety gate, but a position is not
+        # fully managed until both take-profit tranches are present. A prior
+        # partial exit can leave stale TP quantities, so repair them here
+        # without waiting for the next AI decision.
+        incomplete_take_profits = [
+            position
+            for position in positions
+            # If only TP2 remains, TP1 has likely already filled and must not
+            # be recreated behind the current market.  A missing TP2, or no
+            # TP orders at all, is the repairable state.
+            if position.tp2_price is None
+        ]
+        if not hasattr(self.exchange, "upsert_protection") or not hasattr(
+            self.exchange, "get_filters"
+        ):
+            incomplete_take_profits = []
+        protection_repaired = False
+        for position in incomplete_take_profits:
+            try:
+                filters = await self.exchange.get_filters(position.symbol)
+                tranche = self._round_down(
+                    position.quantity * Decimal("0.4"), filters.step_size
+                )
+                if tranche < filters.min_quantity:
+                    # A TP tranche below Binance's minimum cannot be placed;
+                    # retain the hard stop and let a later de-risking action
+                    # remove the residual quantity.
+                    continue
+                orders = await self.exchange.upsert_protection(
+                    self._repair_intent(position),
+                    position.quantity,
+                    position.entry_price,
+                )
+                await self.repository.save_orders(orders)
+                protection_repaired = True
+                logger.info(
+                    "take-profit protection repaired symbol=%s side=%s quantity=%s orders=%d",
+                    position.symbol,
+                    position.side.value,
+                    position.quantity,
+                    len(orders),
+                )
+            except ExchangeError as error:
+                # Keep any existing hard stop in place. Pause new risk until a
+                # later monitor pass repairs the missing take-profit orders.
+                await self.repository.set_mode(
+                    SystemMode.PAUSED,
+                    halt_reason="take-profit protection repair failed",
+                )
+                await self.notifier.send(
+                    "止盈保护修复失败",
+                    (
+                        f"{position.symbol} 止盈保护未完整建立，硬止损保持有效；"
+                        f"系统已暂停增险。{error}"
+                    ),
+                )
+                logger.warning(
+                    "take-profit protection repair failed symbol=%s side=%s error=%s",
+                    position.symbol,
+                    position.side.value,
+                    error,
+                )
+                return
+
+        if protection_repaired:
+            # Refresh the position model before persisting this pass; otherwise
+            # the stale opening snapshot would overwrite the repaired TP state.
+            positions = await self.repository.hydrate_positions(
+                await self.exchange.get_positions()
+            )
+
         snapshots = await self._latest_snapshots()
         changed = False
         for position in positions:
@@ -308,6 +381,49 @@ class PositionProtectionMonitor:
         )
         self._last_active_position_keys = active_keys
         await self.repository.sync_positions(positions)
+
+    @staticmethod
+    def _round_down(value: Decimal, step: Decimal) -> Decimal:
+        from decimal import ROUND_DOWN
+
+        return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    @staticmethod
+    def _repair_intent(position: PositionState) -> ExecutionIntent:
+        risk = abs(position.entry_price - position.stop_price)
+        if risk <= 0:
+            raise ExchangeError("cannot repair take-profit protection without stop distance")
+        if position.side == PositionSide.LONG:
+            tp1 = position.tp1_price or position.entry_price + risk
+            tp2 = position.tp2_price or max(
+                position.entry_price + risk * Decimal("2"), tp1 + risk
+            )
+        else:
+            tp1 = position.tp1_price or position.entry_price - risk
+            tp2 = position.tp2_price or min(
+                position.entry_price - risk * Decimal("2"), tp1 - risk
+            )
+        if min(tp1, tp2) <= 0:
+            raise ExchangeError("cannot repair take-profit protection with invalid target")
+        intent_id = uuid5(
+            NAMESPACE_URL,
+            f"take-profit-repair:{position.position_id}:{position.stop_price}:{tp1}:{tp2}",
+        )
+        return ExecutionIntent(
+            intent_id=intent_id,
+            signal_id=intent_id,
+            symbol=position.symbol,
+            side=position.side,
+            quantity=position.quantity,
+            limit_price=position.entry_price,
+            entry_min=position.entry_price,
+            entry_max=position.entry_price,
+            stop_price=position.stop_price,
+            tp1_price=tp1,
+            tp2_price=tp2,
+            leverage=1,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
 
     async def _cycle_is_active(self) -> bool:
         if self.redis is None:

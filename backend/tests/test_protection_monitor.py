@@ -4,7 +4,8 @@ import pytest
 
 from tests.factories import position, snapshot
 from trading_system.config import Settings
-from trading_system.domain.enums import SystemMode
+from trading_system.domain.enums import PositionSide, SystemMode
+from trading_system.domain.models import ExchangeFilters
 from trading_system.exchange.base import ExchangeError
 from trading_system.orchestration.protection import PositionProtectionMonitor
 
@@ -217,3 +218,75 @@ async def test_stop_adjustment_failure_is_cooled_down_without_freezing_entries()
     assert exchange.tighten_calls == 1
     assert repository.mode == SystemMode.TESTNET
     assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_missing_take_profits_are_rebuilt_and_synced() -> None:
+    current = position(
+        position_id="binance-BTCUSDT-LONG",
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("10"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        original_stop_price=Decimal("98"),
+        initial_risk_usdt=Decimal("20"),
+        current_r=Decimal("0"),
+    )
+
+    repaired = current.model_copy(
+        update={"tp1_price": Decimal("102"), "tp2_price": Decimal("104")}
+    )
+
+    class RepositoryWithRepair(StubRepository):
+        def __init__(self):
+            super().__init__({(current.symbol, current.side.value)})
+            self.saved_orders = []
+
+        async def latest_market(self, limit):
+            del limit
+            return []
+
+        async def save_orders(self, orders):
+            self.saved_orders.extend(orders)
+
+    class RepairExchange(StubExchange):
+        def __init__(self):
+            super().__init__([current])
+            self.repair_calls = []
+
+        async def get_filters(self, symbol):
+            assert symbol == current.symbol
+            return ExchangeFilters(
+                tick_size=Decimal("0.1"),
+                step_size=Decimal("0.1"),
+                min_quantity=Decimal("0.1"),
+                min_notional=Decimal("5"),
+            )
+
+        async def upsert_protection(self, intent, filled_quantity, average_price):
+            self.repair_calls.append((intent, filled_quantity, average_price))
+            self.positions = [repaired]
+            return []
+
+    repository = RepositoryWithRepair()
+    exchange = RepairExchange()
+    monitor = PositionProtectionMonitor(
+        Settings(),
+        repository,  # type: ignore[arg-type]
+        exchange,  # type: ignore[arg-type]
+        StubNotifier(),  # type: ignore[arg-type]
+    )
+
+    await monitor.run_once()
+
+    assert len(exchange.repair_calls) == 1
+    intent, filled_quantity, average_price = exchange.repair_calls[0]
+    assert intent.stop_price == Decimal("98")
+    assert intent.tp1_price == Decimal("102")
+    assert intent.tp2_price == Decimal("104")
+    assert filled_quantity == Decimal("10")
+    assert average_price == Decimal("100")
+    assert repository.synced[0].tp1_price == Decimal("102")
+    assert repository.synced[0].tp2_price == Decimal("104")

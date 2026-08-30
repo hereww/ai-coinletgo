@@ -314,6 +314,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 if protected
                 else entry
             )
+            take_profit_orders = take_profit_by_key.get((row["symbol"], side.value), [])
             take_profits = sorted(
                 {
                     Decimal(
@@ -323,12 +324,30 @@ class BinanceUSDMarketClient(ExchangeGateway):
                             or "0"
                         )
                     )
-                    for order in take_profit_by_key.get((row["symbol"], side.value), [])
+                    for order in take_profit_orders
                 },
                 reverse=side == PositionSide.SHORT,
             )
-            tp1 = take_profits[0] if take_profits else None
-            tp2 = take_profits[1] if len(take_profits) > 1 else tp1
+            # The client id records whether a surviving order is TP1 or TP2.
+            # This matters after TP1 has legitimately filled: rebuilding an
+            # already-hit TP1 would submit a trigger behind the current mark
+            # and could close another tranche immediately.
+            staged_take_profits: dict[str, Decimal] = {}
+            for order in take_profit_orders:
+                trigger = Decimal(
+                    str(order.get("triggerPrice") or order.get("stopPrice") or "0")
+                )
+                client_id = self._algo_client_id(order)
+                if client_id.endswith("_t1"):
+                    staged_take_profits["t1"] = trigger
+                elif client_id.endswith("_t2"):
+                    staged_take_profits["t2"] = trigger
+            if staged_take_profits:
+                tp1 = staged_take_profits.get("t1")
+                tp2 = staged_take_profits.get("t2")
+            else:
+                tp1 = take_profits[0] if take_profits else None
+                tp2 = take_profits[1] if len(take_profits) > 1 else None
             risk_per_unit = max(Decimal("0.00000001"), abs(entry - stop))
             direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
             positions.append(
