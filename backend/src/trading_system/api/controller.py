@@ -673,6 +673,7 @@ class SystemController:
             if raw:
                 payload = json.loads(str(raw))
                 if isinstance(payload, dict):
+                    payload = await self._mark_interrupted_cycle(payload)
                     return payload
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
@@ -689,6 +690,47 @@ class SystemController:
             "approved": 0,
             "executed": 0,
         }
+
+    async def _mark_interrupted_cycle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Label a genuinely abandoned RUNNING cycle without hiding slow model calls."""
+
+        if payload.get("state") != "RUNNING" or payload.get("finished_at") is not None:
+            return payload
+        started_raw = payload.get("started_at")
+        if not isinstance(started_raw, str):
+            return payload
+        try:
+            started_at = datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            return payload
+        now = datetime.now(UTC)
+        timeout_seconds = max(120.0, float(self.settings.model_timeout_seconds))
+        # Allow the configured model timeout plus a bounded execution margin.
+        # A healthy worker heartbeat keeps a long-running request in RUNNING;
+        # only a stale heartbeat and an over-age cycle are marked interrupted.
+        if (now - started_at).total_seconds() <= timeout_seconds + 90.0:
+            return payload
+        heartbeat_raw = await self.redis.get("worker:heartbeat")
+        heartbeat_at: datetime | None = None
+        if isinstance(heartbeat_raw, str):
+            try:
+                heartbeat_at = datetime.fromisoformat(heartbeat_raw.replace("Z", "+00:00"))
+                if heartbeat_at.tzinfo is None:
+                    heartbeat_at = heartbeat_at.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                heartbeat_at = None
+        if heartbeat_at is not None and (now - heartbeat_at).total_seconds() <= 90.0:
+            return payload
+        interrupted = dict(payload)
+        interrupted["state"] = "WORKER_INTERRUPTED"
+        interrupted["failed"] = True
+        interrupted["detail"] = (
+            "Worker 在本轮模型调用或执行期间失联，未确认订单状态；"
+            "已停止新增风险，请检查 Worker 后进行仓位对账。"
+        )
+        return interrupted
 
     async def latest_cycle_status(self) -> dict[str, Any]:
         """Return only the worker status for read-only console views.

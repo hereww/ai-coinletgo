@@ -114,7 +114,7 @@ export interface DashboardData {
   positions: Position[]
   signals: Signal[]
   cycle_status: {
-    state: 'RUNNING' | 'COMPLETED' | 'EXECUTED' | 'NO_CANDIDATES' | 'RISK_REJECTED' | 'MODEL_UNAVAILABLE' | 'MODEL_TIMEOUT' | 'MODEL_THROTTLED' | 'BLOCKED_RECONCILIATION' | 'EXCHANGE_UNAVAILABLE' | 'WORKER_BUSY' | 'FAILED' | 'UNKNOWN'
+    state: 'RUNNING' | 'COMPLETED' | 'EXECUTED' | 'NO_CANDIDATES' | 'RISK_REJECTED' | 'MODEL_UNAVAILABLE' | 'MODEL_TIMEOUT' | 'MODEL_THROTTLED' | 'BLOCKED_RECONCILIATION' | 'EXCHANGE_UNAVAILABLE' | 'WORKER_BUSY' | 'WORKER_INTERRUPTED' | 'FAILED' | 'UNKNOWN'
     detail: string
     started_at: string | null
     finished_at: string | null

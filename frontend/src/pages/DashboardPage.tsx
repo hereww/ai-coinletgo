@@ -72,6 +72,7 @@ export default function DashboardPage() {
     BLOCKED_RECONCILIATION: '需先完成仓位接管，本轮未调用模型',
     EXCHANGE_UNAVAILABLE: '交易所暂不可用，本轮未调用模型',
     WORKER_BUSY: '上一轮仍在执行，本轮未重复启动',
+    WORKER_INTERRUPTED: 'Worker 中断，本轮未增险',
     FAILED: '本轮异常，已安全停止',
     UNKNOWN: '等待 Worker 状态',
   }
