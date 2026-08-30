@@ -743,6 +743,233 @@ async def test_protection_upsert_is_idempotent_and_cancels_stale_algo_orders(
 
 
 @pytest.mark.asyncio
+async def test_protection_upsert_cancels_old_close_orders_before_replacement(
+    tmp_path: object,
+) -> None:
+    events: list[str] = []
+    algo_orders: list[dict[str, object]] = [
+        {
+            "algoId": 90,
+            "clientAlgoId": "frc_previous_sl",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "positionSide": "LONG",
+            "orderType": "STOP_MARKET",
+            "algoStatus": "NEW",
+            "quantity": "0",
+            "triggerPrice": "98",
+            "closePosition": "true",
+        },
+        {
+            "algoId": 91,
+            "clientAlgoId": "frc_previous_t1",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "positionSide": "LONG",
+            "orderType": "TAKE_PROFIT_MARKET",
+            "algoStatus": "NEW",
+            "quantity": "0.8",
+            "triggerPrice": "101",
+            "closePosition": "false",
+        },
+        {
+            "algoId": 92,
+            "clientAlgoId": "frc_previous_t2",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "positionSide": "LONG",
+            "orderType": "TAKE_PROFIT_MARKET",
+            "algoStatus": "NEW",
+            "quantity": "0.8",
+            "triggerPrice": "102",
+            "closePosition": "false",
+        },
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "filters": [
+                                {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                                {"filterType": "LOT_SIZE", "stepSize": "0.1", "minQty": "0.1"},
+                                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                            ],
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/fapi/v1/openAlgoOrders":
+            return httpx.Response(200, json={"orders": algo_orders})
+        if request.url.path == "/fapi/v1/algoOrder" and request.method == "DELETE":
+            client_algo_id = request.url.params.get("clientAlgoId")
+            algo_id = request.url.params.get("algoId")
+            target = next(
+                row
+                for row in algo_orders
+                if (
+                    str(row["algoId"]) == algo_id
+                    if algo_id
+                    else row["clientAlgoId"] == client_algo_id
+                )
+            )
+            target["algoStatus"] = "CANCELED"
+            events.append(f"delete:{target['clientAlgoId']}")
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/fapi/v1/algoOrder" and request.method == "POST":
+            if request.url.params["type"] == "STOP_MARKET" and any(
+                row["algoStatus"] == "NEW" and row["orderType"] == "STOP_MARKET"
+                for row in algo_orders
+            ):
+                # This is the exact Binance conflict that occurred in the
+                # production testnet partial-reduction cycle.
+                return httpx.Response(
+                    400,
+                    json={
+                        "code": -4130,
+                        "msg": (
+                            "An open stop or take profit order with GTE and "
+                            "closePosition in the direction is existing."
+                        ),
+                    },
+                )
+            row = {
+                "algoId": 100 + len(algo_orders),
+                "clientAlgoId": request.url.params["clientAlgoId"],
+                "symbol": request.url.params["symbol"],
+                "side": request.url.params["side"],
+                "positionSide": request.url.params["positionSide"],
+                "orderType": request.url.params["type"],
+                "algoStatus": "NEW",
+                "quantity": request.url.params.get("quantity", "0"),
+                "triggerPrice": request.url.params.get("triggerPrice", "0"),
+                "closePosition": request.url.params.get("closePosition", "false"),
+            }
+            algo_orders.append(row)
+            events.append(f"post:{row['orderType']}")
+            return httpx.Response(200, json=row)
+        raise AssertionError(request.url)
+
+    intent = ExecutionIntent(
+        signal_id="1fef93c8-f2d0-4d45-95f0-e5506fd7fa53",
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("1"),
+        limit_price=Decimal("100"),
+        entry_min=Decimal("99.5"),
+        entry_max=Decimal("100.5"),
+        stop_price=Decimal("99"),
+        tp1_price=Decimal("101"),
+        tp2_price=Decimal("102"),
+        leverage=3,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    try:
+        orders = await client.upsert_protection(intent, Decimal("1"), Decimal("100"))
+    finally:
+        await client.close()
+
+    assert len(orders) == 3
+    assert events[:3] == [
+        "delete:frc_previous_sl",
+        "delete:frc_previous_t1",
+        "delete:frc_previous_t2",
+    ]
+    assert all(event.startswith("delete:") for event in events[:3])
+    assert events[3:] == [
+        "post:STOP_MARKET",
+        "post:TAKE_PROFIT_MARKET",
+        "post:TAKE_PROFIT_MARKET",
+    ]
+    active = [row for row in algo_orders if row["algoStatus"] == "NEW"]
+    assert len([row for row in active if row["orderType"] == "STOP_MARKET"]) == 1
+    assert len([row for row in active if row["orderType"] == "TAKE_PROFIT_MARKET"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_protection_upsert_fails_closed_when_cancellation_is_not_observed(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def immediate_sleep(seconds: float) -> None:
+        del seconds
+
+    monkeypatch.setattr("trading_system.exchange.binance.asyncio.sleep", immediate_sleep)
+    deletes = 0
+    posts = 0
+    old_stop = {
+        "algoId": 90,
+        "clientAlgoId": "frc_previous_sl",
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "positionSide": "LONG",
+        "orderType": "STOP_MARKET",
+        "algoStatus": "NEW",
+        "quantity": "0",
+        "triggerPrice": "98",
+        "closePosition": "true",
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal deletes, posts
+        if request.url.path == "/fapi/v1/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "filters": [
+                                {"filterType": "PRICE_FILTER", "tickSize": "0.1"},
+                                {"filterType": "LOT_SIZE", "stepSize": "0.1", "minQty": "0.1"},
+                                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                            ],
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/fapi/v1/openAlgoOrders":
+            return httpx.Response(200, json={"orders": [old_stop]})
+        if request.url.path == "/fapi/v1/algoOrder" and request.method == "DELETE":
+            deletes += 1
+            # Simulate Binance acknowledging DELETE while its open-order read
+            # still reports the old conditional order as active.
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/fapi/v1/algoOrder" and request.method == "POST":
+            posts += 1
+            return httpx.Response(500, json={"msg": "unexpected replacement"})
+        raise AssertionError(request.url)
+
+    intent = ExecutionIntent(
+        signal_id="1fef93c8-f2d0-4d45-95f0-e5506fd7fa53",
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("1"),
+        limit_price=Decimal("100"),
+        entry_min=Decimal("99.5"),
+        entry_max=Decimal("100.5"),
+        stop_price=Decimal("99"),
+        tp1_price=Decimal("101"),
+        tp2_price=Decimal("102"),
+        leverage=3,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ExchangeError, match="cancellation not confirmed"):
+            await client.upsert_protection(intent, Decimal("1"), Decimal("100"))
+    finally:
+        await client.close()
+
+    assert deletes == 1
+    assert posts == 0
+
+
+@pytest.mark.asyncio
 async def test_tighten_stop_creates_replacement_before_canceling_old_stop(
     tmp_path: object,
 ) -> None:

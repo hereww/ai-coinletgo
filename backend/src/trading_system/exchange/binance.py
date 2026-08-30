@@ -768,43 +768,94 @@ class BinanceUSDMarketClient(ExchangeGateway):
         tranche_suffix = hashlib.sha256(
             f"{intent.intent_id}:{self._fmt(filled_quantity)}".encode()
         ).hexdigest()[:12]
-        specs: list[tuple[str, str, Decimal, bool]] = [
-            (f"frc_{stop_suffix}_sl", "STOP_MARKET", intent.stop_price, True),
+        specs: list[tuple[str, str, Decimal, bool, Decimal]] = [
+            (f"frc_{stop_suffix}_sl", "STOP_MARKET", intent.stop_price, True, Decimal("0")),
         ]
         if q1 >= filters.min_quantity:
             specs.append(
-                (f"frc_{tranche_suffix}_t1", "TAKE_PROFIT_MARKET", tp1_price, False)
+                (
+                    f"frc_{tranche_suffix}_t1",
+                    "TAKE_PROFIT_MARKET",
+                    tp1_price,
+                    False,
+                    q1,
+                )
             )
         if q2 >= filters.min_quantity:
             specs.append(
-                (f"frc_{tranche_suffix}_t2", "TAKE_PROFIT_MARKET", intent.tp2_price, False)
+                (
+                    f"frc_{tranche_suffix}_t2",
+                    "TAKE_PROFIT_MARKET",
+                    intent.tp2_price,
+                    False,
+                    q2,
+                )
             )
-        desired_ids = {client_id for client_id, *_ in specs}
+
+        # Binance rejects a replacement while an older close-position stop is
+        # still open (often as ``-4130``).  Match semantically first so an
+        # unchanged protection order can be kept even when its client id came
+        # from an earlier entry/decision.  Everything else is stale and must
+        # be canceled and observed as inactive before any replacement is
+        # submitted.
+        existing = self._algo_orders(
+            await self._request(
+                "GET", "/fapi/v1/openAlgoOrders", {"symbol": intent.symbol}, signed=True
+            )
+        )
+        active_managed = [
+            order
+            for order in existing
+            if (
+                order.get("positionSide") == intent.side.value
+                and str(order.get("orderType") or order.get("type") or "")
+                in {"STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"}
+                and self._algo_client_id(order).startswith("frc_")
+                and self._algo_active(order)
+            )
+        ]
+
         orders: list[OrderState] = []
-        for client_id, order_type, trigger, close_position in specs:
+        retained_ids: set[str] = set()
+        pending_specs: list[tuple[str, str, Decimal, bool, Decimal]] = []
+        for client_id, order_type, trigger, close_position, quantity in specs:
             current = next(
                 (
                     order
-                    for order in existing
-                    if self._algo_client_id(order) == client_id and self._algo_active(order)
+                    for order in active_managed
+                    if self._algo_client_id(order) not in retained_ids
+                    and self._algo_matches(
+                        order,
+                        symbol=intent.symbol,
+                        side=close_side,
+                        position_side=intent.side.value,
+                        order_type=order_type,
+                        trigger=trigger,
+                        quantity=quantity,
+                        close_position=close_position,
+                    )
                 ),
                 None,
             )
-            quantity = Decimal("0") if close_position else (q1 if client_id.endswith("_t1") else q2)
-            if current is not None and self._algo_matches(
-                current,
-                symbol=intent.symbol,
-                side=close_side,
-                position_side=intent.side.value,
-                order_type=order_type,
-                trigger=trigger,
-                quantity=quantity,
-                close_position=close_position,
-            ):
-                orders.append(self._algo_order_state(current))
-                continue
             if current is not None:
-                await self._cancel_algo_order(intent.symbol, current)
+                retained_ids.add(self._algo_client_id(current))
+                orders.append(self._algo_order_state(current))
+            else:
+                pending_specs.append((client_id, order_type, trigger, close_position, quantity))
+
+        stale_ids = {
+            self._algo_client_id(order)
+            for order in active_managed
+            if self._algo_client_id(order) not in retained_ids
+        }
+        for order in active_managed:
+            if self._algo_client_id(order) in stale_ids:
+                await self._cancel_algo_order(intent.symbol, order)
+
+        if stale_ids:
+            await self._wait_for_algo_cancellations(intent.symbol, stale_ids)
+
+        for client_id, order_type, trigger, close_position, quantity in pending_specs:
             orders.append(
                 await self._submit_algo_order(
                     {
@@ -827,35 +878,117 @@ class BinanceUSDMarketClient(ExchangeGateway):
                     }
                 )
             )
-        for order in existing:
-            if (
-                order.get("positionSide") == intent.side.value
-                and str(order.get("orderType") or order.get("type") or "")
-                in {"STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"}
-                and self._algo_client_id(order).startswith("frc_")
-                and self._algo_active(order)
-                and self._algo_client_id(order) not in desired_ids
-            ):
-                await self._cancel_algo_order(intent.symbol, order)
+
         final = self._algo_orders(
             await self._request(
                 "GET", "/fapi/v1/openAlgoOrders", {"symbol": intent.symbol}, signed=True
             )
         )
-        active_stops = [
+        final_active = [
             order
             for order in final
             if order.get("positionSide") == intent.side.value
-            and str(order.get("orderType") or order.get("type") or "") == "STOP_MARKET"
+            and str(order.get("orderType") or order.get("type") or "")
+            in {"STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"}
             and self._algo_client_id(order).startswith("frc_")
             and self._algo_active(order)
         ]
-        if len(active_stops) != 1 or self._algo_client_id(active_stops[0]) != specs[0][0]:
+        self._validate_protection_set(
+            intent,
+            close_side=close_side,
+            specs=specs,
+            active_orders=final_active,
+        )
+        self._invalidate_position_cache()
+        return orders
+
+    async def _wait_for_algo_cancellations(
+        self, symbol: str, canceled_ids: set[str]
+    ) -> list[dict[str, Any]]:
+        """Wait until Binance no longer reports the canceled Algo orders.
+
+        Algo cancellations are normally reflected immediately, but the API
+        can briefly return the pre-cancel snapshot.  Creating a replacement
+        during that window causes Binance's close-position conflict error.
+        Keep the retry bounded and fail closed if an old protection remains.
+        """
+
+        last: list[dict[str, Any]] = []
+        for delay in (0.0, 0.20, 0.50, 1.00):
+            if delay:
+                await asyncio.sleep(delay)
+            last = self._algo_orders(
+                await self._request(
+                    "GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol}, signed=True
+                )
+            )
+            active_ids = {
+                self._algo_client_id(order)
+                for order in last
+                if self._algo_active(order)
+            }
+            if not active_ids.intersection(canceled_ids):
+                return last
+        lingering = sorted(
+            self._algo_client_id(order)
+            for order in last
+            if self._algo_active(order)
+            and self._algo_client_id(order) in canceled_ids
+        )
+        raise ExchangeError(
+            "managed protection cancellation not confirmed: " + ", ".join(lingering)
+        )
+
+    @classmethod
+    def _validate_protection_set(
+        cls,
+        intent: ExecutionIntent,
+        *,
+        close_side: str,
+        specs: list[tuple[str, str, Decimal, bool, Decimal]],
+        active_orders: list[dict[str, Any]],
+    ) -> None:
+        """Require exactly the stop/TP set requested by the current position."""
+
+        active_stops = [
+            order
+            for order in active_orders
+            if str(order.get("orderType") or order.get("type") or "") == "STOP_MARKET"
+        ]
+        if len(active_stops) != 1:
             raise ExchangeError(
                 "protection invariant violated: expected exactly one active hard stop"
             )
-        self._invalidate_position_cache()
-        return orders
+
+        unmatched = list(active_orders)
+        for _, order_type, trigger, close_position, quantity in specs:
+            match_index = next(
+                (
+                    index
+                    for index, order in enumerate(unmatched)
+                    if cls._algo_matches(
+                        order,
+                        symbol=intent.symbol,
+                        side=close_side,
+                        position_side=intent.side.value,
+                        order_type=order_type,
+                        trigger=trigger,
+                        quantity=quantity,
+                        close_position=close_position,
+                    )
+                ),
+                None,
+            )
+            if match_index is None:
+                raise ExchangeError(
+                    "protection invariant violated: active stop/TP set does not match "
+                    "the requested remaining quantity"
+                )
+            unmatched.pop(match_index)
+        if unmatched:
+            raise ExchangeError(
+                "protection invariant violated: unexpected active managed stop/TP orders"
+            )
 
     @staticmethod
     def _tp1_for_fill(intent: ExecutionIntent, average_price: Decimal) -> Decimal:
