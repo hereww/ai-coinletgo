@@ -63,6 +63,24 @@ async def test_cycle_status_distinguishes_non_model_blockers(
 
 
 @pytest.mark.asyncio
+async def test_cycle_status_distinguishes_exchange_unavailable() -> None:
+    redis = StatusRedis()
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.redis = redis
+    result = await cycle._finish_cycle(
+        CycleResult(
+            exchange_unavailable=True,
+            detail="交易所请求失败，本轮未调用模型：Binance REST backoff active",
+        ),
+        datetime.now(UTC),
+    )
+
+    assert result.detail.startswith("交易所请求失败")
+    assert redis.status is not None
+    assert redis.status["state"] == "EXCHANGE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
 async def test_stale_cycle_lock_is_cleared_without_active_marker() -> None:
     redis = StatusRedis(lock=True)
     redis.status = {"state": "COMPLETED"}

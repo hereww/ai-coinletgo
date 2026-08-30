@@ -68,7 +68,7 @@ export default function DashboardPage() {
     MODEL_UNAVAILABLE: '模型不可用，本轮未增险',
     MODEL_TIMEOUT: '模型响应超时，本轮未增险',
     MODEL_THROTTLED: '模型节流中，本轮未重复调用',
-    BLOCKED_RECONCILIATION: '仓位对账未完成，本轮未调用模型',
+    BLOCKED_RECONCILIATION: '需先完成仓位接管，本轮未调用模型',
     EXCHANGE_UNAVAILABLE: '交易所暂不可用，本轮未调用模型',
     WORKER_BUSY: '上一轮仍在执行，本轮未重复启动',
     FAILED: '本轮异常，已安全停止',
