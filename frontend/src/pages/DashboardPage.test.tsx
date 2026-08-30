@@ -126,15 +126,19 @@ describe('DashboardPage', () => {
     expect(screen.getAllByText('标记价格').length).toBeGreaterThan(1)
   })
 
-  it('resumes directly from paused mode without a confirmation dialog', async () => {
+  it('requires the operator password to resume testnet execution', async () => {
     apiMock.dashboard.mockResolvedValue({ ...dashboard, mode: 'PAUSED' })
     renderPage()
 
     fireEvent.click(await screen.findByRole('button', { name: '恢复运行' }))
+    expect(screen.getByRole('dialog', { name: '恢复测试网运行' })).toBeInTheDocument()
+    const confirm = screen.getByRole('button', { name: '确认恢复' })
+    expect(confirm).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('操作密码'), { target: { value: 'operator-password' } })
+    fireEvent.click(confirm)
 
-    await waitFor(() => expect(apiMock.resumeTestnet).toHaveBeenCalledOnce())
-    expect(apiMock.resumeTestnet).toHaveBeenCalledWith()
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(apiMock.resumeTestnet).toHaveBeenCalledWith('operator-password'))
+    expect(screen.queryByRole('dialog', { name: '恢复测试网运行' })).not.toBeInTheDocument()
   })
 
   it('does not queue a cycle while position reconciliation is pending', async () => {
@@ -165,33 +169,38 @@ describe('DashboardPage', () => {
   it('requires the operator password for emergency flatten', async () => {
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: '紧急清仓' }))
-    const dialog = screen.getByRole('dialog', { name: '紧急清仓' })
+    expect(screen.getByRole('dialog', { name: '紧急清仓' })).toBeInTheDocument()
     const confirm = screen.getByRole('button', { name: '立即清仓' })
     expect(confirm).toBeDisabled()
     fireEvent.change(screen.getByLabelText('操作密码'), { target: { value: 'operator-password' } })
-    expect(dialog).toBeInTheDocument()
     fireEvent.click(confirm)
     await waitFor(() => expect(apiMock.flatten.mock.calls[0][0]).toBe('operator-password'))
   })
 
-  it('queues a bounded AI and risk cycle directly from the dashboard', async () => {
+  it('requires the operator password before queuing a bounded AI and risk cycle', async () => {
     const view = renderPage()
     fireEvent.click(await within(view.container).findByRole('button', { name: '立即分析并执行' }))
-    await waitFor(() => expect(apiMock.runCycle).toHaveBeenCalledOnce())
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '立即分析并执行' })).toBeInTheDocument()
+    const confirm = screen.getByRole('button', { name: '确认分析执行' })
+    expect(confirm).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('操作密码'), { target: { value: 'operator-password' } })
+    fireEvent.click(confirm)
+    await waitFor(() => expect(apiMock.runCycle).toHaveBeenCalledWith('operator-password'))
+    expect(screen.queryByRole('dialog', { name: '立即分析并执行' })).not.toBeInTheDocument()
   })
 
-  it('resumes a paused testnet before queuing the cycle', async () => {
+  it('requires one password confirmation to resume and queue a paused testnet cycle', async () => {
     apiMock.dashboard.mockResolvedValue({ ...dashboard, mode: 'PAUSED' })
     const view = renderPage()
 
     fireEvent.click(await within(view.container).findByRole('button', { name: '恢复并分析' }))
+    expect(screen.getByRole('dialog', { name: '恢复并分析' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('操作密码'), { target: { value: 'operator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认恢复并分析' }))
 
-    await waitFor(() => {
-      expect(apiMock.resumeTestnet).toHaveBeenCalledOnce()
-      expect(apiMock.runCycle).toHaveBeenCalledOnce()
-    })
-    expect(apiMock.runCycle.mock.invocationCallOrder[0]).toBeGreaterThan(apiMock.resumeTestnet.mock.invocationCallOrder[0])
+    await waitFor(() => expect(apiMock.runCycle).toHaveBeenCalledWith('operator-password'))
+    expect(apiMock.resumeTestnet).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: '恢复并分析' })).not.toBeInTheDocument()
   })
 
   it('opens a manual entry desk with a separate AI advice conversation', async () => {

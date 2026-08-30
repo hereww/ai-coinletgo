@@ -13,7 +13,7 @@ import { PositionsTable } from '../features/dashboard/PositionsTable'
 import { RiskCapacity } from '../features/dashboard/RiskCapacity'
 import { SignalsList } from '../features/dashboard/SignalsList'
 
-type Dialog = 'flatten' | 'unlock' | 'reconcile' | 'manual-entry' | null
+type Dialog = 'flatten' | 'unlock' | 'reconcile' | 'resume' | 'cycle' | 'manual-entry' | null
 
 const EquityChart = lazy(() => import('../features/dashboard/EquityChart').then((module) => ({ default: module.EquityChart })))
 
@@ -23,21 +23,13 @@ export default function DashboardPage() {
   const dashboard = useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard, refetchInterval: 15_000 })
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['dashboard'] })
   const pause = useMutation({ mutationFn: api.pause, onSuccess: refresh })
-  const resume = useMutation({ mutationFn: () => api.resumeTestnet(), onSuccess: () => { setDialog(null); refresh() } })
+  const resume = useMutation({ mutationFn: (password: string) => api.resumeTestnet(password), onSuccess: () => { setDialog(null); refresh() } })
   const reconcile = useMutation({ mutationFn: api.reconcilePositions, onSuccess: () => { setDialog(null); refresh() } })
   const flatten = useMutation({ mutationFn: api.flatten, onSuccess: () => { setDialog(null); refresh() } })
   const unlock = useMutation({ mutationFn: api.unlockLive, onSuccess: () => { setDialog(null); refresh() } })
   const runCycle = useMutation({
-    mutationFn: async ({ mode, environment }: { mode: string; environment: 'testnet' | 'live' }) => {
-      // A deliberate click on the testnet execution action is also an explicit
-      // request to resume a manually paused testnet. Live and reconciliation
-      // modes remain blocked by the backend safety gate.
-      if (environment === 'testnet' && mode === 'PAUSED') {
-        await api.resumeTestnet()
-      }
-      return api.runCycle()
-    },
-    onSuccess: refresh,
+    mutationFn: (password: string) => api.runCycle(password),
+    onSuccess: () => { setDialog(null); refresh() },
   })
 
   if (dashboard.isLoading) return <><PageHeader title="合约风控台" subtitle="正在同步运行环境" /><PageLoading /></>
@@ -84,8 +76,8 @@ export default function DashboardPage() {
         <div className="command-row">
           <Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => dashboard.refetch()} aria-label="刷新数据">刷新</Button>
           {data.environment === 'testnet' ? <Button icon={<Plus size={15} />} onClick={() => setDialog('manual-entry')} disabled={!data.health.ready || data.mode !== 'TESTNET'}>手动开仓</Button> : null}
-          <Button icon={<Play size={15} />} onClick={() => runCycle.mutate({ mode: data.mode, environment: data.environment })} disabled={!data.health.ready || runCycle.isPending || reconciliationBlocked}>{runCycle.isPending ? '分析执行中...' : reconciliationBlocked ? '完成仓位对账后再分析' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
-          {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('reconcile')}>确认仓位状态</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => resume.mutate()} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
+          <Button icon={<Play size={15} />} onClick={() => setDialog('cycle')} disabled={!data.health.ready || runCycle.isPending || reconciliationBlocked}>{runCycle.isPending ? '分析执行中...' : reconciliationBlocked ? '完成仓位对账后再分析' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
+          {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('reconcile')}>确认仓位状态</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => setDialog('resume')} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
           {data.environment === 'live' ? <Button icon={<LockKeyhole size={15} />} onClick={() => setDialog('unlock')}>解锁实盘</Button> : null}
           <Button variant="danger" icon={<OctagonAlert size={15} />} onClick={() => setDialog('flatten')}>紧急清仓</Button>
         </div>
@@ -115,6 +107,8 @@ export default function DashboardPage() {
       <ConfirmDialog open={dialog === 'flatten'} title="紧急清仓" body="系统将暂停新开仓，并以市价关闭专用子账户中的全部受管仓位。" confirmLabel="立即清仓" requirePassword danger busy={flatten.isPending} error={flatten.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => flatten.mutate(password)} />
       <ConfirmDialog open={dialog === 'unlock'} title="解锁实盘" body="只有在币安、模型、数据库、时间同步和认证健康检查全部通过时，实盘才会启用。" confirmLabel="检查并解锁" requirePassword busy={unlock.isPending} error={unlock.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => unlock.mutate(password)} />
       <ConfirmDialog open={dialog === 'reconcile'} title="确认交易所仓位" body="系统会重新读取币安仓位。只有每个仓位都存在可识别的交易所端硬止损时，才会接受当前状态。" confirmLabel="验证并确认" requirePassword busy={reconcile.isPending} error={reconcile.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => reconcile.mutate(password)} />
+      <ConfirmDialog open={dialog === 'resume'} title="恢复测试网运行" body="系统将恢复测试网自动交易。下一轮周期可能根据 AI 组合决策产生开仓、加仓或调仓动作。" confirmLabel="确认恢复" requirePassword busy={resume.isPending} error={resume.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => resume.mutate(password)} />
+      <ConfirmDialog open={dialog === 'cycle'} title={data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'} body="系统将进行一轮完整市场扫描、AI 组合决策、确定性风控和保护单校验；符合条件时可能提交测试网订单。" confirmLabel={data.environment === 'testnet' && data.mode === 'PAUSED' ? '确认恢复并分析' : '确认分析执行'} requirePassword busy={runCycle.isPending} error={runCycle.error?.message} onClose={() => setDialog(null)} onConfirm={(password) => runCycle.mutate(password)} />
       <ManualEntryDialog open={dialog === 'manual-entry'} onClose={() => setDialog(null)} />
     </>
   )

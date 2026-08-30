@@ -33,7 +33,10 @@ def test_api_starts_in_locked_down_unconfigured_state() -> None:
         assert integrations.json()["proxy"]["enabled"] is False
         assert integrations.json()["proxy"]["configured"] is False
 
-        resume = client.post("/api/v1/actions/resume-testnet")
+        resume = client.post(
+            "/api/v1/actions/resume-testnet",
+            json={"password": ""},
+        )
         assert resume.status_code == 200
         assert resume.json()["mode"] == "TESTNET"
 

@@ -89,12 +89,15 @@ export const api = {
   updateConfig: (payload: Partial<RiskConfig> & { password?: string }) =>
     request<RiskConfig>('/api/v1/config', { method: 'PATCH', body: JSON.stringify(payload) }),
   pause: () => request<{ mode: string }>('/api/v1/actions/pause', { method: 'POST' }),
-  runCycle: (password = '') => request<{ status: string; operation_id: string }>('/api/v1/actions/run-cycle', {
+  runCycle: (password: string) => request<{ status: string; operation_id: string }>('/api/v1/actions/run-cycle', {
     method: 'POST',
     body: JSON.stringify({ password }),
   }),
-  resumeTestnet: () =>
-    request<{ mode: string }>('/api/v1/actions/resume-testnet', { method: 'POST' }),
+  resumeTestnet: (password: string) =>
+    request<{ mode: string }>('/api/v1/actions/resume-testnet', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
   reconcilePositions: (password: string) =>
     request<{ mode: string }>('/api/v1/actions/reconcile', {
       method: 'POST',

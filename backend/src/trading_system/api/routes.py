@@ -387,12 +387,10 @@ async def run_cycle(
     service: Controller,
     repo: Repo,
 ) -> dict[str, str]:
-    # Testnet cycles are bounded by the testnet gateway and hard risk gates, so
-    # the dashboard can trigger them directly. Live manual cycles still require
-    # the operator password even though live unlock has a separate gate.
-    if service.settings.binance_environment == "live" and not security.verify_password(
-        payload.password
-    ):
+    # A cycle may place testnet orders, so every manual trigger uses the same
+    # operator-password confirmation.  Live mode still has its separate unlock
+    # gate in addition to this check.
+    if not security.verify_password(payload.password):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
         operation_id = await service.queue_cycle()
@@ -411,11 +409,15 @@ async def run_cycle(
 
 @router.post("/actions/resume-testnet")
 async def resume_testnet(
+    payload: PasswordActionRequest,
     request: Request,
     user: MutatingUser,
+    security: Security,
     service: Controller,
     repo: Repo,
 ) -> dict[str, str]:
+    if not security.verify_password(payload.password):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     try:
         mode = await service.resume_testnet()
     except ValueError as error:
@@ -425,7 +427,7 @@ async def resume_testnet(
         action="resume_testnet",
         resource="system",
         outcome="success",
-        detail={"confirmation": "direct_button"},
+        detail={"confirmation": "password"},
         ip_address=request.client.host if request.client else None,
     )
     return {"mode": mode.value}
