@@ -178,6 +178,21 @@ async def test_universe_skips_non_standard_testnet_symbols(tmp_path: object) -> 
 
 
 @pytest.mark.asyncio
+async def test_best_entry_price_uses_marketable_side_of_book(tmp_path: object) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/ticker/bookTicker":
+            return httpx.Response(200, json={"bidPrice": "99", "askPrice": "101"})
+        raise AssertionError(request.url)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    try:
+        assert await client.best_entry_price("BTCUSDT", "BUY") == Decimal("101")
+        assert await client.best_entry_price("BTCUSDT", "SELL") == Decimal("99")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_account_state_includes_realized_fees_and_funding_ledger(tmp_path: object) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/fapi/v2/account":

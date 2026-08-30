@@ -684,7 +684,14 @@ class BinanceUSDMarketClient(ExchangeGateway):
 
     async def best_entry_price(self, symbol: str, side: str) -> Decimal:
         body = await self._request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": symbol})
-        return Decimal(body["bidPrice"] if side == "BUY" else body["askPrice"])
+        # Use the marketable side of the spread.  A BUY at the best ask and a
+        # SELL at the best bid can fill immediately while remaining a bounded
+        # LIMIT order; the caller still applies the model-approved entry
+        # interval before submitting it.  The old passive-side quote (BUY at
+        # bid / SELL at ask) routinely sat unfilled until the 30-second
+        # reprice deadline, making approved portfolio entries look like
+        # strategy failures.
+        return Decimal(body["askPrice"] if side == "BUY" else body["bidPrice"])
 
     async def get_mark_price(self, symbol: str) -> Decimal:
         body = await self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
