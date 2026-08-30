@@ -319,7 +319,8 @@ class TradingCycle:
             )
             await self.notifier.send(
                 "无保护仓位待人工处置",
-                f"检测到 {len(unsafe_positions)} 个无硬止损仓位，已冻结新仓，请完成仓位对账或清仓。",
+                f"检测到 {len(unsafe_positions)} 个无硬止损仓位，已冻结新仓，"
+                "请完成仓位对账或清仓。",
             )
             result.detail = "unprotected positions require reconciliation"
             return result
@@ -750,6 +751,20 @@ class TradingCycle:
                         action.symbol,
                         action.action.value,
                     )
+                    # An exchange-side stop/TP may have flattened a position
+                    # just before a stale model CLOSE/REDUCE reached Binance.
+                    # ExitExecutionManager reports that race as an idempotent
+                    # no-op; refresh local state immediately so the next cycle
+                    # does not keep trying to close a position that is gone.
+                    if action.action in {
+                        PortfolioPlanActionType.CLOSE,
+                        PortfolioPlanActionType.REDUCE,
+                    }:
+                        refreshed = await self.repository.hydrate_positions(
+                            await self.exchange.get_positions()
+                        )
+                        await self.repository.sync_positions(refreshed)
+                        current_by_symbol = {item.symbol: item for item in refreshed}
                     continue
                 result.executed += 1
                 if action.action in {

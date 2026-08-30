@@ -4,6 +4,7 @@ import pytest
 
 from tests.test_execution_manager import FakeExchange, order
 from trading_system.domain.enums import OrderStatus
+from trading_system.exchange.base import ExchangeError
 from trading_system.execution.exit import ExitExecutionManager
 
 
@@ -63,6 +64,26 @@ async def test_cancel_response_fill_reduces_market_fallback_quantity() -> None:
     ).execute(position, Decimal("1"), "operator-close", Decimal("100"))
 
     assert result[-1].filled_quantity == Decimal("0.6")
+    assert exchange.protection_canceled == [position]
+
+
+@pytest.mark.asyncio
+async def test_already_flat_position_is_idempotent_when_exchange_rejects_stale_exit() -> None:
+    exchange = FakeExchange()
+
+    async def place_limit_exit(position, quantity, price, operation_id):
+        del position, quantity, price, operation_id
+        raise ExchangeError(
+            "400 [-4509]: Time in Force (TIF) GTE can only be used with open positions."
+        )
+
+    exchange.place_limit_exit = place_limit_exit  # type: ignore[method-assign]
+    position = exchange_position()
+    result = await ExitExecutionManager(exchange).execute(
+        position, Decimal("1"), "model-close", Decimal("100")
+    )
+
+    assert result == []
     assert exchange.protection_canceled == [position]
 
 

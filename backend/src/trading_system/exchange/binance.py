@@ -912,6 +912,12 @@ class BinanceUSDMarketClient(ExchangeGateway):
         try:
             body = await self._request("POST", "/fapi/v1/order", parameters, signed=True)
         except ExchangeError as error:
+            # Even a rejected exit can race with an exchange-side stop/TP that
+            # flattened the position just before this request.  Do not let a
+            # cached position survive that write failure; the exit manager
+            # needs a fresh read to classify Binance's narrow "no open
+            # position" response as an idempotent no-op.
+            self._invalidate_position_cache()
             if self._is_ambiguous_write_error(error):
                 return await self._resolve_ambiguous_order(
                     position.symbol, client_order_id, error

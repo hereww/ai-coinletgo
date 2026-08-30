@@ -40,9 +40,19 @@ class ExitExecutionManager:
         if quantity <= 0:
             raise ExchangeError("exit quantity must be positive")
         async with self._locks[position.position_id]:
-            order = await self.exchange.place_limit_exit(
-                position, quantity, limit_price, operation_id
-            )
+            try:
+                order = await self.exchange.place_limit_exit(
+                    position, quantity, limit_price, operation_id
+                )
+            except ExchangeError as error:
+                # A model-directed close can race with an exchange-side stop or
+                # take-profit.  Binance then rejects the stale exit because the
+                # position is already flat.  Reconcile that narrow case as an
+                # idempotent successful de-risking action instead of pausing all
+                # future entries for an exposure that no longer exists.
+                if await self._already_flat_after_rejection(position, error):
+                    return []
+                raise
             orders = [order]
             latest = order
             elapsed = 0
@@ -90,6 +100,37 @@ class ExitExecutionManager:
                 else:
                     await self.exchange.cancel_position_take_profits(position)
             return orders
+
+    async def _already_flat_after_rejection(
+        self, position: PositionState, error: ExchangeError
+    ) -> bool:
+        if not self._is_flat_position_rejection(error):
+            return False
+        try:
+            positions = await self.exchange.get_positions()
+        except Exception:
+            # A failed reconciliation read must remain a real execution error;
+            # swallowing it could leave an unknown position unprotected.
+            return False
+        if any(
+            item.symbol == position.symbol
+            and item.side == position.side
+            and item.quantity > 0
+            for item in positions
+        ):
+            return False
+        # There is no remaining position to protect.  Remove stale managed
+        # stop/TP orders before reporting the idempotent no-op to the caller.
+        await self.exchange.cancel_position_protection(position)
+        return True
+
+    @staticmethod
+    def _is_flat_position_rejection(error: ExchangeError) -> bool:
+        message = str(error).lower()
+        return error.code == -4509 or (
+            "time in force" in message
+            and "open position" in message
+        )
 
     async def _position_is_flat(self, position: PositionState) -> bool:
         try:
