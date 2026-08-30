@@ -59,6 +59,7 @@ export default function DashboardPage() {
     failed: false,
   }
   const paused = ['PAUSED', 'RISK_HALTED', 'RECONCILIATION_REQUIRED'].includes(data.mode)
+  const reconciliationBlocked = data.mode === 'RECONCILIATION_REQUIRED'
   const cycleStateLabel: Record<typeof cycleStatus.state, string> = {
     RUNNING: '本轮执行中',
     COMPLETED: '本轮已完成',
@@ -82,7 +83,7 @@ export default function DashboardPage() {
         <div className="command-row">
           <Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => dashboard.refetch()} aria-label="刷新数据">刷新</Button>
           {data.environment === 'testnet' ? <Button icon={<Plus size={15} />} onClick={() => setDialog('manual-entry')} disabled={!data.health.ready || data.mode !== 'TESTNET'}>手动开仓</Button> : null}
-          <Button icon={<Play size={15} />} onClick={() => runCycle.mutate({ mode: data.mode, environment: data.environment })} disabled={!data.health.ready || runCycle.isPending}>{runCycle.isPending ? '分析执行中...' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
+          <Button icon={<Play size={15} />} onClick={() => runCycle.mutate({ mode: data.mode, environment: data.environment })} disabled={!data.health.ready || runCycle.isPending || reconciliationBlocked}>{runCycle.isPending ? '分析执行中...' : reconciliationBlocked ? '接管后再分析' : data.environment === 'testnet' && data.mode === 'PAUSED' ? '恢复并分析' : '立即分析并执行'}</Button>
           {data.mode === 'RECONCILIATION_REQUIRED' ? <Button icon={<Play size={15} />} onClick={() => setDialog('takeover')}>接管仓位</Button> : paused ? <Button icon={<Play size={15} />} onClick={() => resume.mutate()} disabled={resume.isPending}>{resume.isPending ? '恢复中...' : '恢复运行'}</Button> : <Button icon={<Pause size={15} />} onClick={() => pause.mutate()} disabled={pause.isPending}>暂停开仓</Button>}
           {data.environment === 'live' ? <Button icon={<LockKeyhole size={15} />} onClick={() => setDialog('unlock')}>解锁实盘</Button> : null}
           <Button variant="danger" icon={<OctagonAlert size={15} />} onClick={() => setDialog('flatten')}>紧急清仓</Button>

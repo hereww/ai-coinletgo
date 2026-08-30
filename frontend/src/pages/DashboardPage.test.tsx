@@ -136,6 +136,31 @@ describe('DashboardPage', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('does not queue a cycle while reconciliation takeover is pending', async () => {
+    apiMock.dashboard.mockResolvedValue({
+      ...dashboard,
+      mode: 'RECONCILIATION_REQUIRED',
+      cycle_status: {
+        state: 'BLOCKED_RECONCILIATION',
+        detail: '仓位对账待人工接管，本轮未调用模型',
+        started_at: null,
+        finished_at: null,
+        snapshots: 0,
+        candidates: 0,
+        signals: 0,
+        approved: 0,
+        executed: 0,
+        failed: false,
+      },
+    })
+    renderPage()
+
+    const analyze = await screen.findByRole('button', { name: '接管后再分析' })
+    expect(analyze).toBeDisabled()
+    expect(screen.getByText('需先完成仓位接管，本轮未调用模型')).toBeInTheDocument()
+    expect(apiMock.runCycle).not.toHaveBeenCalled()
+  })
+
   it('requires typed confirmation and totp for emergency flatten', async () => {
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: '紧急清仓' }))
