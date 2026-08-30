@@ -141,7 +141,7 @@ class SystemController:
         proxy_scope = (
             "AI 中转（Binance 直连）"
             if self.settings.http_proxy_enabled
-            and not self.settings.binance_http_proxy_enabled
+            and not self.settings.binance_proxy_enabled
             else "Binance + AI 中转"
             if self.settings.http_proxy_enabled
             else "未启用代理"
