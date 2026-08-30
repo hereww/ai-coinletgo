@@ -775,6 +775,25 @@ class TradingCycle:
                     result.detail = "组合执行后触发风控熔断"
                     break
             except Exception as error:
+                # A limit entry can become stale while the model decision is
+                # still valid.  Treat that one action as an ordinary no-fill
+                # and let the next cycle re-evaluate it; do not freeze the
+                # whole testnet for a price that simply left its guard band.
+                if self._is_soft_entry_guard_error(error):
+                    await self.repository.save_portfolio_execution(
+                        plan,
+                        action,
+                        status="NO_FILL",
+                        orders=[],
+                        detail="approved entry price guard no longer matched",
+                    )
+                    logger.info(
+                        "portfolio action skipped because entry guard moved "
+                        "symbol=%s action=%s",
+                        action.symbol,
+                        action.action.value,
+                    )
+                    continue
                 result.failed = True
                 await self.repository.save_portfolio_execution(
                     plan, action, status="FAILED", orders=[], detail=str(error)[:400]
@@ -799,6 +818,14 @@ class TradingCycle:
                     f"计划 {len(plan.actions)} 项，批准风险 {plan.approved_risk_usdt} USDT"
                 )
         return result
+
+    @staticmethod
+    def _is_soft_entry_guard_error(error: Exception) -> bool:
+        """Return whether an entry missed its approved price band without a write."""
+
+        return isinstance(error, ExchangeError) and not isinstance(
+            error, ExchangeUnknownStatusError
+        ) and str(error).strip() == "current price moved outside approved entry guard"
 
     @staticmethod
     def _portfolio_action_filled(action: Any, orders: list[Any]) -> bool:

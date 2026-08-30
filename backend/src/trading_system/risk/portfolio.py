@@ -63,9 +63,14 @@ class PortfolioCompiler:
         if decision.expires_at <= now:
             plan.reasons.append("portfolio_decision_expired")
             return plan
-        if mode != SystemMode.TESTNET:
+        # A paused or risk-halted testnet may still need to reduce exposure or
+        # tighten protection.  Only the reconciliation boundary and the live
+        # lock are fail-closed for the whole plan.  Entries/adds are filtered
+        # below when the mode is PAUSED or RISK_HALTED.
+        if mode in {SystemMode.LIVE_LOCKED, SystemMode.RECONCILIATION_REQUIRED}:
             plan.reasons.append("system_mode_disallows_entries")
             return plan
+        risk_increase_blocked = mode in {SystemMode.PAUSED, SystemMode.RISK_HALTED}
 
         current_by_symbol = {item.symbol: item for item in positions}
         allocations = {item.symbol: item for item in decision.allocations}
@@ -174,14 +179,18 @@ class PortfolioCompiler:
         for allocation, action in sorted(
             increases, key=lambda item: (item[0].priority, -item[0].confidence, item[0].symbol)
         ):
-            validation = self._validate_increase(
-                action,
-                allocation,
-                projected,
-                snapshots,
-                limits,
-                account,
-                correlations,
+            validation = (
+                "system_mode_disallows_risk_increase"
+                if risk_increase_blocked
+                else self._validate_increase(
+                    action,
+                    allocation,
+                    projected,
+                    snapshots,
+                    limits,
+                    account,
+                    correlations,
+                )
             )
             if validation is None and approved_risk + action.target_risk_usdt > risk_cap:
                 validation = "portfolio_risk_capacity_exhausted"

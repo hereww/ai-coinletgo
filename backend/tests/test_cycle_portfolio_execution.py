@@ -13,6 +13,7 @@ from trading_system.domain.models import (
     PortfolioDecision,
     PortfolioPlanAction,
 )
+from trading_system.exchange.base import ExchangeError, ExchangeUnknownStatusError
 from trading_system.orchestration.cycle import TradingCycle
 
 
@@ -129,6 +130,18 @@ def test_portfolio_action_fill_detection_ignores_unfilled_limit_order() -> None:
     assert TradingCycle._portfolio_action_filled(
         action, [order.model_copy(update={"filled_quantity": Decimal("1")})]
     ) is True
+
+
+def test_price_guard_miss_is_a_soft_no_fill_but_unknown_order_status_is_not() -> None:
+    assert TradingCycle._is_soft_entry_guard_error(
+        ExchangeError("current price moved outside approved entry guard")
+    )
+    assert not TradingCycle._is_soft_entry_guard_error(
+        ExchangeUnknownStatusError(
+            "current price moved outside approved entry guard",
+            client_order_id="frc-unknown",
+        )
+    )
 
 
 @pytest.mark.asyncio

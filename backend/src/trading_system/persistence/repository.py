@@ -80,6 +80,7 @@ REASON_LABELS_ZH: dict[str, str] = {
     "invalid_price_geometry": "入场、止损和止盈价格关系无效",
     "rounded_stop_invalid": "按交易所精度处理后止损无效",
     "system_mode_disallows_entries": "当前系统模式不允许开仓",
+    "system_mode_disallows_risk_increase": "当前系统模式仅允许降风险动作",
     "HOLD_POSITION": "已有仓位，当前周期继续持有",
     "HOLD_EXISTING_POSITION": "已有仓位，当前周期继续持有",
     "HOLD_VALID": "原有交易逻辑仍然有效",

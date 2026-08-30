@@ -135,6 +135,50 @@ def test_compiler_closes_existing_position_when_target_is_flat() -> None:
     assert plan.actions[0].target_quantity == 0
 
 
+@pytest.mark.parametrize("mode", [SystemMode.PAUSED, SystemMode.RISK_HALTED])
+def test_compiler_allows_de_risk_actions_when_entries_are_halted(mode: SystemMode) -> None:
+    current = position(symbol="BTCUSDT", side=PositionSide.LONG)
+    flat = allocation(
+        "BTCUSDT",
+        target_side=PortfolioTargetSide.FLAT,
+        allocation_fraction=Decimal("0"),
+        entry_min=None,
+        entry_max=None,
+        stop_price=None,
+        target_price=None,
+    )
+
+    plan = PortfolioCompiler().compile(
+        decision(flat),
+        snapshots={},
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=context().limits,
+        mode=mode,
+    )
+
+    assert plan.actions[0].action == PortfolioPlanActionType.CLOSE
+    assert plan.actions[0].reasons == ["model_target_is_flat"]
+
+
+@pytest.mark.parametrize("mode", [SystemMode.PAUSED, SystemMode.RISK_HALTED])
+def test_compiler_rejects_risk_increases_when_entries_are_halted(mode: SystemMode) -> None:
+    plan = PortfolioCompiler().compile(
+        decision(allocation()),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=context().limits,
+        mode=mode,
+    )
+
+    assert plan.status == PortfolioPlanStatus.REJECTED
+    assert plan.actions[0].action == PortfolioPlanActionType.REJECTED
+    assert plan.actions[0].reasons == ["system_mode_disallows_risk_increase"]
+
+
 def test_compiler_defers_same_cycle_reversal() -> None:
     current = position(symbol="BTCUSDT", side=PositionSide.LONG)
     reverse = allocation(
