@@ -25,7 +25,7 @@ const integrations = {
   proxy: {
     enabled: false,
     configured: false,
-    scope: 'Binance + AI 中转',
+    scope: '未启用代理',
     detail: 'HTTP 代理未启用',
   },
   binance: {
@@ -71,7 +71,7 @@ beforeEach(() => {
 it('shows testnet and model integration state and runs a non-ordering testnet probe', async () => {
   renderPage()
   expect(await screen.findByText('HTTP 代理模式')).toBeInTheDocument()
-  expect(screen.getByText('Binance + AI 中转')).toBeInTheDocument()
+  expect(screen.getByText('未启用代理')).toBeInTheDocument()
   expect(screen.getByText('币安测试网')).toBeInTheDocument()
   expect(screen.getByText('AI 模型 / Responses API')).toBeInTheDocument()
   expect(screen.getByText('Qwen/Qwen3.8-27B-FP8')).toBeInTheDocument()

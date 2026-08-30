@@ -44,7 +44,7 @@ export default function SettingsPage() {
     <section className="integration-grid">
       <div className="surface integration-card">
         <div className="section-head"><h2><Network size={16} /> HTTP 代理模式</h2><StatusIcon healthy={proxy.enabled && proxy.configured} /></div>
-        <div className="integration-body"><dl><div><dt>状态</dt><dd className={proxy.enabled && proxy.configured ? 'positive' : 'warning'}>{proxy.detail}</dd></div><div><dt>覆盖范围</dt><dd>{proxy.scope}</dd></div><div><dt>代理地址</dt><dd>{proxy.configured ? '已挂载 secret（地址已隐藏）' : '未配置'}</dd></div></dl><p className="setup-note"><KeyRound size={14} /> 代理地址不会进入页面、数据库或日志。请在服务器运行 <code>scripts/configure-http-proxy.sh</code>，输入 HTTP/HTTPS 代理后重建 api/worker；该模式会同时作用于 Binance REST/WebSocket 与 AI 中转。</p></div>
+        <div className="integration-body"><dl><div><dt>状态</dt><dd className={proxy.enabled && proxy.configured ? 'positive' : 'warning'}>{proxy.detail}</dd></div><div><dt>覆盖范围</dt><dd>{proxy.scope}</dd></div><div><dt>代理地址</dt><dd>{proxy.configured ? '已挂载 secret（地址已隐藏）' : '未配置'}</dd></div></dl><p className="setup-note"><KeyRound size={14} /> 代理地址不会进入页面、数据库或日志。当前部署可将代理仅用于 AI 中转，Binance 测试网保持直连；如需调整，请在服务器更新对应 secret 和 Binance 代理开关后重建 api/worker。</p></div>
       </div>
       <div className="surface integration-card">
         <div className="section-head"><h2><TestTube2 size={16} /> 币安测试网</h2><StatusIcon healthy={binance.configured && binance.health.state === 'HEALTHY'} /></div>

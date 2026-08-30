@@ -138,11 +138,19 @@ class SystemController:
         return operation_id
 
     async def integration_status(self) -> dict[str, Any]:
+        proxy_scope = (
+            "AI 中转（Binance 直连）"
+            if self.settings.http_proxy_enabled
+            and not self.settings.binance_http_proxy_enabled
+            else "Binance + AI 中转"
+            if self.settings.http_proxy_enabled
+            else "未启用代理"
+        )
         return {
             "proxy": {
                 "enabled": self.settings.http_proxy_enabled,
                 "configured": self.settings.http_proxy_configured,
-                "scope": "Binance + AI 中转",
+                "scope": proxy_scope,
                 "detail": self.settings.http_proxy_detail,
             },
             "binance": {
