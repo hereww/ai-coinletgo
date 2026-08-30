@@ -731,9 +731,20 @@ class TradingCycle:
             try:
                 orders = await self._execute_portfolio_action(action, current_by_symbol, decision)
                 await self.repository.save_orders(orders)
+                filled = self._portfolio_action_filled(action, orders)
                 await self.repository.save_portfolio_execution(
-                    plan, action, status="EXECUTED", orders=orders
+                    plan,
+                    action,
+                    status="EXECUTED" if filled else "NO_FILL",
+                    orders=orders,
                 )
+                if not filled:
+                    logger.info(
+                        "portfolio action completed without fill symbol=%s action=%s",
+                        action.symbol,
+                        action.action.value,
+                    )
+                    continue
                 result.executed += 1
                 if action.action in {
                     PortfolioPlanActionType.OPEN,
@@ -777,12 +788,35 @@ class TradingCycle:
                     f"组合决策完成：{decision.market_regime}，无调仓动作，"
                     f"风险预算 {plan.risk_cap_usdt} USDT"
                 )
+            elif result.executed == 0 and actionable_actions:
+                result.detail = (
+                    f"组合决策完成：{decision.market_regime}，计划 {len(plan.actions)} 项，"
+                    "本轮未产生成交"
+                )
             else:
                 result.detail = (
                     f"组合决策完成：{decision.market_regime}，"
                     f"计划 {len(plan.actions)} 项，批准风险 {plan.approved_risk_usdt} USDT"
                 )
         return result
+
+    @staticmethod
+    def _portfolio_action_filled(action: Any, orders: list[Any]) -> bool:
+        """Return whether a plan action changed risk or successfully updated protection.
+
+        Entry and exit actions are only executions when at least one child LIMIT/MARKET
+        order reports a fill.  Protection updates intentionally have no fills of their
+        own; the exchange invariant checked by ``upsert_protection`` is their success
+        signal.  This keeps an unfilled entry from being audited as a position change.
+        """
+
+        if action.action == PortfolioPlanActionType.TIGHTEN_STOP:
+            return bool(orders)
+        return any(
+            getattr(order, "order_type", "") in {"LIMIT", "MARKET"}
+            and getattr(order, "filled_quantity", Decimal("0")) > 0
+            for order in orders
+        )
 
     @staticmethod
     def _portfolio_replay_context(

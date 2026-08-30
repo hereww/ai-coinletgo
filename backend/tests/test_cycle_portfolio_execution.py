@@ -111,6 +111,26 @@ def _reduce_action(position_state) -> PortfolioPlanAction:
     )
 
 
+def test_portfolio_action_fill_detection_ignores_unfilled_limit_order() -> None:
+    action = PortfolioPlanAction(
+        action_id=uuid4(),
+        allocation_id=uuid4(),
+        symbol="BTCUSDT",
+        action=PortfolioPlanActionType.OPEN,
+        side=PositionSide.LONG,
+        target_quantity=Decimal("1"),
+        quantity_delta=Decimal("1"),
+    )
+    order = _order("LIMIT").model_copy(
+        update={"filled_quantity": Decimal("0"), "status": OrderStatus.SUBMITTED}
+    )
+
+    assert TradingCycle._portfolio_action_filled(action, [order]) is False
+    assert TradingCycle._portfolio_action_filled(
+        action, [order.model_copy(update={"filled_quantity": Decimal("1")})]
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_partial_reduce_refreshes_protection_for_remaining_quantity() -> None:
     current = position(
