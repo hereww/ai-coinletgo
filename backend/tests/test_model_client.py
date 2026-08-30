@@ -94,6 +94,39 @@ async def test_valid_structured_response_and_sanitized_payload(tmp_path: object)
 
 
 @pytest.mark.asyncio
+async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
+    tmp_path: object,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "RANGING",
+            "portfolio_risk_budget_fraction": 0,
+            "allocations": [],
+            "summary": "当前无合格组合机会",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    client = ResponsesModelClient(model_settings(tmp_path), transport=httpx.MockTransport(handler))
+    try:
+        await client.analyze_portfolio(
+            [snapshot(symbol="BTCUSDT")],
+            [],
+            datetime.now(UTC) + timedelta(minutes=15),
+        )
+    finally:
+        await client.close()
+
+    system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
+    assert "机会下限" in system_text
+    assert "ADX_1h >= 20" in system_text
+    assert "不能仅因15分钟触发暂为0" in system_text
+
+
+@pytest.mark.asyncio
 async def test_relay_output_message_text_is_parsed_without_repair(tmp_path: object) -> None:
     calls = 0
 
