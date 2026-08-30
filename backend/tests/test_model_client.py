@@ -127,6 +127,38 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
 
 
 @pytest.mark.asyncio
+async def test_balanced_portfolio_prompt_is_not_trigger_only(tmp_path: object) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "RANGING",
+            "portfolio_risk_budget_fraction": 0,
+            "allocations": [],
+            "summary": "当前无合格组合机会",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    settings = model_settings(tmp_path)
+    settings.strategy_profile = "balanced"
+    client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
+    try:
+        await client.analyze_portfolio(
+            [snapshot(symbol="BTCUSDT")],
+            [],
+            datetime.now(UTC) + timedelta(minutes=15),
+        )
+    finally:
+        await client.close()
+
+    system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
+    assert "ADX_1h >= 20" in system_text
+    assert "不得仅因 breakout_15m 和 pullback_15m 都为0就把组合预算设为0" in system_text
+
+
+@pytest.mark.asyncio
 async def test_relay_output_message_text_is_parsed_without_repair(tmp_path: object) -> None:
     calls = 0
 

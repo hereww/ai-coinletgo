@@ -292,7 +292,7 @@ PORTFOLIO_PROFILE_GUIDANCE = {
         "保持最高选择性；只有高周期一致、15分钟触发、量能确认和完整风险几何同时满足时才分配风险。"
     ),
     "balanced": (
-        "机会下限：如果至少一个候选满足 trend_1h == trend_4h 且不为0、ADX_1h >= 25、"
+        "机会下限：如果至少一个候选满足 trend_1h == trend_4h 且不为0、ADX_1h >= 20、"
         "spread_pct <= 0.0015、volatility_percentile <= 0.85，并且没有严重"
         "资金费率、基差或流动性冲突，"
         "不得仅因 breakout_15m 和 pullback_15m 都为0就把组合预算设为0。请从最强的1至2个候选中"
