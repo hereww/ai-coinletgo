@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from redis.asyncio import Redis
+
+from trading_system.ai.client import RedisDailyBudget, ResponsesModelClient
+from trading_system.api.controller import SystemController
+from trading_system.api.routes import router
+from trading_system.api.security import SecurityService
+from trading_system.backtest.service import ReplayService
+from trading_system.config import get_settings
+from trading_system.exchange.binance import BinanceUSDMarketClient
+from trading_system.notifications.telegram import TelegramNotifier
+from trading_system.persistence.database import Database
+from trading_system.persistence.repository import Repository
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    security = SecurityService(settings)
+    if (
+        settings.app_env == "production" or settings.binance_environment == "live"
+    ) and not security.production_configured():
+        raise RuntimeError("production authentication and secure cookies are not configured")
+    database = Database(settings.database_connection_url)
+    if settings.app_env != "production":
+        await database.create_schema()
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    repository = Repository(database)
+    await repository.apply_runtime_config(settings)
+    exchange = BinanceUSDMarketClient(settings)
+    model = ResponsesModelClient(settings, RedisDailyBudget(redis))
+    notifier = TelegramNotifier(settings)
+    replay_service = ReplayService(repository, exchange, notifier)
+    controller = SystemController(settings, database, redis, repository, exchange, model)
+
+    app.state.settings = settings
+    app.state.database = database
+    app.state.redis = redis
+    app.state.repository = repository
+    app.state.exchange = exchange
+    app.state.model = model
+    app.state.security = security
+    app.state.controller = controller
+    app.state.notifier = notifier
+    app.state.replay_service = replay_service
+    yield
+
+    await model.close()
+    await notifier.close()
+    await exchange.close()
+    await redis.aclose()
+    await database.dispose()
+
+
+settings = get_settings()
+app = FastAPI(
+    title=settings.app_name,
+    version="0.1.0",
+    docs_url="/api/docs" if settings.app_env != "production" else None,
+    redoc_url=None,
+    lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
+)
+app.include_router(router)

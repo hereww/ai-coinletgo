@@ -1,0 +1,169 @@
+name: futures-risk-console
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: trading
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trading@postgres:5432/trading
+      REDIS_URL: redis://redis:6379/0
+      SECRET_DIR: /run/secrets
+    secrets:
+      - auth_password_hash
+      - auth_totp_secret
+      - session_secret
+      - postgres_password
+      - model_api_key
+      - vllm_model_api_key
+      - binance_testnet_api_key
+      - binance_testnet_api_secret
+      - binance_live_api_key
+      - binance_live_api_secret
+      - http_proxy_url
+      - telegram_bot_token
+      - telegram_chat_id
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "trading_system.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://trading@postgres:5432/trading
+      REDIS_URL: redis://redis:6379/0
+      SECRET_DIR: /run/secrets
+    secrets:
+      - postgres_password
+      - model_api_key
+      - vllm_model_api_key
+      - binance_testnet_api_key
+      - binance_testnet_api_secret
+      - binance_live_api_key
+      - binance_live_api_secret
+      - http_proxy_url
+      - telegram_bot_token
+      - telegram_chat_id
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "8080:80"
+      - "443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+  backup:
+    build:
+      context: .
+      dockerfile: infra/backup/Dockerfile
+    entrypoint: ["/bin/sh", "/scripts/backup-postgres.sh"]
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: trading
+      PGUSER: trading
+      BACKUP_DIR: /backups
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./backups:/backups
+    secrets:
+      - postgres_password
+      - backup_encryption_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  backup_encryption_key:
+    file: ./secrets/backup_encryption_key
+  auth_password_hash:
+    file: ./secrets/auth_password_hash
+  auth_totp_secret:
+    file: ./secrets/auth_totp_secret
+  session_secret:
+    file: ./secrets/session_secret
+  model_api_key:
+    file: ./secrets/model_api_key
+  vllm_model_api_key:
+    file: ./secrets/vllm_model_api_key
+  binance_testnet_api_key:
+    file: ./secrets/binance_testnet_api_key
+  binance_testnet_api_secret:
+    file: ./secrets/binance_testnet_api_secret
+  binance_live_api_key:
+    file: ./secrets/binance_live_api_key
+  binance_live_api_secret:
+    file: ./secrets/binance_live_api_secret
+  http_proxy_url:
+    file: ./secrets/http_proxy_url
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
+  telegram_chat_id:
+    file: ./secrets/telegram_chat_id

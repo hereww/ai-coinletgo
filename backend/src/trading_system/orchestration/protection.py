@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from decimal import Decimal
+
+from redis.asyncio import Redis
+
+from trading_system.config import Settings
+from trading_system.domain.enums import PositionSide, SystemMode
+from trading_system.domain.models import MarketSnapshot, PositionState
+from trading_system.exchange.base import ExchangeError
+from trading_system.exchange.binance import BinanceUSDMarketClient
+from trading_system.notifications.telegram import TelegramNotifier
+from trading_system.persistence.repository import Repository
+
+logger = logging.getLogger("trading-worker.protection")
+
+
+class PositionProtectionMonitor:
+    def __init__(
+        self,
+        settings: Settings,
+        repository: Repository,
+        exchange: BinanceUSDMarketClient,
+        notifier: TelegramNotifier,
+        *,
+        redis: Redis | None = None,
+        interval_seconds: float = 30,
+        failure_cooldown_seconds: float = 300,
+        adjustment_cooldown_seconds: float = 60,
+        orphan_cleanup_interval_seconds: float = 300,
+        event_debounce_seconds: float = 15,
+    ) -> None:
+        self.settings = settings
+        self.repository = repository
+        self.exchange = exchange
+        self.notifier = notifier
+        self.redis = redis
+        self.interval_seconds = interval_seconds
+        self.failure_cooldown_seconds = failure_cooldown_seconds
+        self.adjustment_cooldown_seconds = adjustment_cooldown_seconds
+        # The account-wide openAlgoOrders endpoint is rate limited more
+        # aggressively than positionRisk.  Do not poll it every 10 seconds
+        # while the account is empty; clean immediately on a position-state
+        # transition and otherwise use a slow safety sweep.
+        self.orphan_cleanup_interval_seconds = orphan_cleanup_interval_seconds
+        self.event_debounce_seconds = event_debounce_seconds
+        self._failure_cooldowns: dict[str, float] = {}
+        self._adjustment_cooldowns: dict[str, float] = {}
+        self._cooldown_logged: set[str] = set()
+        self._last_orphan_cleanup_at = 0.0
+        self._last_active_position_keys: set[tuple[str, str]] = set()
+        self._run_lock = asyncio.Lock()
+        self._event_debounce_until = 0.0
+        self._retry_not_before = 0.0
+
+    async def run_forever(self) -> None:
+        while True:
+            try:
+                wait_until = max(self._retry_not_before, 0.0)
+                now = time.monotonic()
+                if wait_until > now:
+                    await asyncio.sleep(wait_until - now)
+                await self.run_once()
+            except ExchangeError as error:
+                # A Binance 418/429/-1003 response is a transport cooldown,
+                # not a protection failure.  Keep existing exchange-side
+                # hard stops in place and avoid emitting a traceback every
+                # polling interval while the IP is cooling down.
+                delay = max(
+                    self.interval_seconds,
+                    error.retry_after_seconds or self.failure_cooldown_seconds,
+                )
+                self._retry_not_before = max(
+                    self._retry_not_before, time.monotonic() + delay
+                )
+                if error.code == -1003 or error.http_status in {418, 429}:
+                    logger.warning(
+                        "position protection polling deferred after Binance rate limit "
+                        "code=%s http_status=%s retry_seconds=%.0f",
+                        error.code,
+                        error.http_status,
+                        delay,
+                    )
+                else:
+                    logger.warning(
+                        "position protection polling failed; existing exchange hard stops "
+                        "remain active error_type=%s retry_seconds=%.0f",
+                        type(error).__name__,
+                        delay,
+                    )
+                    await self.notifier.send(
+                        "保护监控暂缓",
+                        "交易所保护监控暂时失败；既有硬止损保持有效，系统将在冷却后重试。",
+                    )
+            except Exception:
+                logger.exception("position protection monitor iteration failed")
+                await self.notifier.send(
+                    "保护监控异常", "仓位保护监控本轮失败；交易所端既有硬止损保持有效。"
+                )
+            if self._retry_not_before > time.monotonic():
+                continue
+            await asyncio.sleep(self.interval_seconds)
+
+    async def run_once(self, *, source: str = "periodic") -> None:
+        if source == "event":
+            now = time.monotonic()
+            if now < self._event_debounce_until:
+                return
+            self._event_debounce_until = now + self.event_debounce_seconds
+        try:
+            async with self._run_lock:
+                await self._run_once()
+        except ExchangeError as error:
+            await self._defer_exchange_error(error)
+
+    async def _defer_exchange_error(self, error: ExchangeError) -> None:
+        delay = max(
+            self.interval_seconds,
+            error.retry_after_seconds or self.failure_cooldown_seconds,
+        )
+        self._retry_not_before = max(self._retry_not_before, time.monotonic() + delay)
+        if error.code == -1003 or error.http_status in {418, 429}:
+            logger.warning(
+                "position protection polling deferred after Binance rate limit "
+                "code=%s http_status=%s retry_seconds=%.0f",
+                error.code,
+                error.http_status,
+                delay,
+            )
+            return
+        logger.warning(
+            "position protection polling failed; existing exchange hard stops remain "
+            "active error_type=%s retry_seconds=%.0f",
+            type(error).__name__,
+            delay,
+        )
+        await self.notifier.send(
+            "保护监控暂缓",
+            "交易所保护监控暂时失败；既有硬止损保持有效，系统将在冷却后重试。",
+        )
+
+    async def _run_once(self) -> None:
+        if not self.exchange.configured:
+            return
+        positions = await self.repository.hydrate_positions(await self.exchange.get_positions())
+        known = await self.repository.known_open_position_keys()
+        actual = {(position.symbol, position.side.value) for position in positions}
+        duplicate_symbol = len({position.symbol for position in positions}) != len(positions)
+        # A just-filled order can become visible on Binance a few seconds
+        # before TradingCycle persists the corresponding PositionRecord.  The
+        # monitor runs concurrently, so treating that tiny window as an
+        # unknown operator position would freeze the whole testnet.  Defer
+        # only the transient unknown-key case while the cycle lock is held;
+        # duplicate long/short exposure still fails closed immediately.
+        if actual - known and not duplicate_symbol and await self._cycle_is_active():
+            logger.warning(
+                "deferring reconciliation for exchange position during active cycle "
+                "unknown_keys=%s",
+                sorted(actual - known),
+            )
+            return
+        if actual - known or duplicate_symbol:
+            current_mode = await self.repository.get_mode(
+                SystemMode.TESTNET
+                if self.settings.binance_environment == "testnet"
+                else SystemMode.LIVE_LOCKED,
+                self.settings.binance_environment,
+            )
+            if current_mode != SystemMode.RECONCILIATION_REQUIRED:
+                await self.repository.set_mode(
+                    SystemMode.RECONCILIATION_REQUIRED,
+                    halt_reason=(
+                        "simultaneous long and short position detected"
+                        if duplicate_symbol
+                        else "exchange contains positions unknown to the database"
+                    ),
+                )
+                await self.notifier.send(
+                    "仓位对账异常",
+                    "检测到数据库未知的币安仓位，系统已冻结新开仓。",
+                )
+            return
+        if not positions:
+            await self._cleanup_orphans_if_due(
+                set(),
+                force=bool(self._last_active_position_keys),
+            )
+            self._last_active_position_keys = set()
+            await self.repository.sync_positions([])
+            return
+
+        unsafe = [position for position in positions if not position.protected]
+        if unsafe:
+            current_mode = await self.repository.get_mode(
+                SystemMode.TESTNET
+                if self.settings.binance_environment == "testnet"
+                else SystemMode.LIVE_LOCKED,
+                self.settings.binance_environment,
+            )
+            if current_mode == SystemMode.RECONCILIATION_REQUIRED:
+                await self.repository.sync_positions(positions)
+                return
+            await self.repository.set_mode(
+                SystemMode.RECONCILIATION_REQUIRED,
+                halt_reason="unprotected exchange position detected",
+            )
+            await self.notifier.send(
+                "无保护仓位待人工处置",
+                f"检测到 {len(unsafe)} 个无交易所硬止损仓位，已冻结新仓，请人工接管或清仓。",
+            )
+            return
+
+        snapshots = await self._latest_snapshots()
+        changed = False
+        for position in positions:
+            snapshot = snapshots.get(position.symbol)
+            stop = self._managed_stop(position, snapshot)
+            if stop is None:
+                continue
+            key = position.position_id
+            now = time.monotonic()
+            if self._adjustment_cooldowns.get(key, 0) > now:
+                continue
+            retry_at = self._failure_cooldowns.get(key, 0)
+            if retry_at > now:
+                if key not in self._cooldown_logged:
+                    logger.info(
+                        "stop adjustment retry suppressed symbol=%s side=%s "
+                        "current_stop=%s proposed_stop=%s cooldown_remaining_seconds=%.0f",
+                        position.symbol,
+                        position.side.value,
+                        position.stop_price,
+                        stop,
+                        retry_at - now,
+                    )
+                    self._cooldown_logged.add(key)
+                continue
+            try:
+                order = await self.exchange.tighten_stop(position, stop)
+            except ExchangeError as error:
+                hard_stop_preserved = "rollback could not restore hard stop" not in str(error)
+                self._failure_cooldowns[key] = now + self.failure_cooldown_seconds
+                self._cooldown_logged.discard(key)
+                logger.warning(
+                    "stop adjustment failed symbol=%s side=%s current_stop=%s "
+                    "proposed_stop=%s mark_price=%s binance_code=%s http_status=%s "
+                    "error=%s cooldown_seconds=%.0f existing_hard_stop_preserved=%s",
+                    position.symbol,
+                    position.side.value,
+                    position.stop_price,
+                    stop,
+                    position.mark_price,
+                    error.code,
+                    error.http_status,
+                    error,
+                    self.failure_cooldown_seconds,
+                    hard_stop_preserved,
+                )
+                if not hard_stop_preserved:
+                    await self.repository.set_mode(
+                        SystemMode.RECONCILIATION_REQUIRED,
+                        halt_reason="stop replacement rollback failed",
+                    )
+                    await self.notifier.send(
+                        "止损回滚失败",
+                        f"{position.symbol} 追踪止损替换与回滚均失败，"
+                        "已冻结新开仓，请立即检查币安硬止损。",
+                    )
+                continue
+            except Exception as error:
+                self._failure_cooldowns[key] = now + self.failure_cooldown_seconds
+                self._cooldown_logged.discard(key)
+                logger.exception(
+                    "stop adjustment failed symbol=%s side=%s current_stop=%s "
+                    "proposed_stop=%s error_type=%s cooldown_seconds=%.0f",
+                    position.symbol,
+                    position.side.value,
+                    position.stop_price,
+                    stop,
+                    type(error).__name__,
+                    self.failure_cooldown_seconds,
+                )
+                continue
+            self._failure_cooldowns.pop(key, None)
+            self._cooldown_logged.discard(key)
+            self._adjustment_cooldowns[key] = now + self.adjustment_cooldown_seconds
+            await self.repository.save_orders([order])
+            logger.info(
+                "stop adjustment succeeded symbol=%s side=%s previous_stop=%s new_stop=%s",
+                position.symbol,
+                position.side.value,
+                position.stop_price,
+                order.stop_price,
+            )
+            changed = True
+        if changed:
+            positions = await self.repository.hydrate_positions(await self.exchange.get_positions())
+        active_keys = {(position.symbol, position.side.value) for position in positions}
+        await self._cleanup_orphans_if_due(
+            active_keys,
+            force=active_keys != self._last_active_position_keys,
+        )
+        self._last_active_position_keys = active_keys
+        await self.repository.sync_positions(positions)
+
+    async def _cycle_is_active(self) -> bool:
+        if self.redis is None:
+            return False
+        try:
+            return bool(await self.redis.exists("trading-cycle"))
+        except Exception:
+            logger.debug("trading cycle lock check failed", exc_info=True)
+            return False
+
+    async def _cleanup_orphans_if_due(
+        self, active_positions: set[tuple[str, str]], *, force: bool = False
+    ) -> None:
+        cancel_orphans = getattr(self.exchange, "cancel_orphan_protection_orders", None)
+        if cancel_orphans is None:
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_orphan_cleanup_at
+            < self.orphan_cleanup_interval_seconds
+        ):
+            return
+        # Record the attempt before the network call.  A rate-limit response
+        # must not turn into a tight retry loop that prolongs the ban.
+        self._last_orphan_cleanup_at = now
+        await cancel_orphans(active_positions)
+
+    async def _latest_snapshots(self) -> dict[str, MarketSnapshot]:
+        rows = await self.repository.latest_market(self.settings.universe_size)
+        snapshots: dict[str, MarketSnapshot] = {}
+        for row in rows:
+            try:
+                snapshot = MarketSnapshot.model_validate(row)
+            except ValueError:
+                continue
+            snapshots[snapshot.symbol] = snapshot
+        return snapshots
+
+    @staticmethod
+    def _managed_stop(position: PositionState, snapshot: MarketSnapshot | None) -> Decimal | None:
+        if position.current_r < Decimal("1"):
+            return None
+        cost_buffer = position.entry_price * Decimal("0.0015")
+        if position.side == PositionSide.LONG:
+            candidate = position.entry_price + cost_buffer
+            if position.current_r >= Decimal("2") and snapshot is not None:
+                candidate = max(
+                    candidate,
+                    position.mark_price - snapshot.atr_15m * Decimal("1.5"),
+                )
+            if position.stop_price < candidate < position.mark_price:
+                return candidate
+        else:
+            candidate = position.entry_price - cost_buffer
+            if position.current_r >= Decimal("2") and snapshot is not None:
+                candidate = min(
+                    candidate,
+                    position.mark_price + snapshot.atr_15m * Decimal("1.5"),
+                )
+            if position.stop_price > candidate > position.mark_price:
+                return candidate
+        return None
