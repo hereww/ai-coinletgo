@@ -234,6 +234,71 @@ def test_compiler_refreshes_protection_when_target_price_changes() -> None:
     assert "take_profit_updated" in plan.actions[0].reasons
 
 
+def test_compiler_ignores_existing_target_that_collides_with_tp1() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        tp1_price=Decimal("102"),
+        tp2_price=Decimal("106"),
+        initial_risk_usdt=Decimal("2"),
+    )
+    invalid_update = allocation(
+        "BTCUSDT",
+        allocation_fraction=Decimal("0.27"),
+        stop_price=Decimal("98"),
+        target_price=Decimal("102"),
+    )
+
+    plan = PortfolioCompiler().compile(
+        decision(invalid_update),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    assert plan.actions[0].action == PortfolioPlanActionType.HOLD
+    assert plan.actions[0].target_price == Decimal("106")
+    assert "take_profit_target_not_beyond_tp1_ignored" in plan.actions[0].reasons
+
+
+def test_compiler_rejects_add_when_target_does_not_extend_beyond_tp1() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        tp1_price=Decimal("102"),
+        tp2_price=Decimal("106"),
+        initial_risk_usdt=Decimal("2"),
+    )
+    invalid_add = allocation(
+        "BTCUSDT",
+        allocation_fraction=Decimal("0.5"),
+        stop_price=Decimal("98"),
+        target_price=Decimal("102"),
+    )
+
+    plan = PortfolioCompiler().compile(
+        decision(invalid_add),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    assert plan.actions[0].action == PortfolioPlanActionType.REJECTED
+    assert plan.actions[0].reasons == ["take_profit_target_not_beyond_tp1"]
+
+
 def test_compiler_fails_closed_for_expired_decision() -> None:
     created_at = datetime.now(UTC) - timedelta(minutes=15)
     expired = decision(

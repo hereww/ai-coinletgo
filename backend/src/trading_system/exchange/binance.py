@@ -771,16 +771,12 @@ class BinanceUSDMarketClient(ExchangeGateway):
     async def upsert_protection(
         self, intent: ExecutionIntent, filled_quantity: Decimal, average_price: Decimal
     ) -> list[OrderState]:
+        tp1_price = self._tp1_for_fill(intent, average_price)
+        self._validate_take_profit_geometry(intent, tp1_price)
         filters = await self.get_filters(intent.symbol)
         q1 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         q2 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         close_side = "SELL" if intent.side == PositionSide.LONG else "BUY"
-        tp1_price = self._tp1_for_fill(intent, average_price)
-        existing = self._algo_orders(
-            await self._request(
-                "GET", "/fapi/v1/openAlgoOrders", {"symbol": intent.symbol}, signed=True
-            )
-        )
         stop_suffix = hashlib.sha256(
             f"{intent.intent_id}:{self._fmt(intent.stop_price)}".encode()
         ).hexdigest()[:12]
@@ -790,7 +786,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         specs: list[tuple[str, str, Decimal, bool, Decimal]] = [
             (f"frc_{stop_suffix}_sl", "STOP_MARKET", intent.stop_price, True, Decimal("0")),
         ]
-        if q1 >= filters.min_quantity:
+        if tp1_price is not None and q1 >= filters.min_quantity:
             specs.append(
                 (
                     f"frc_{tranche_suffix}_t1",
@@ -1010,7 +1006,9 @@ class BinanceUSDMarketClient(ExchangeGateway):
             )
 
     @staticmethod
-    def _tp1_for_fill(intent: ExecutionIntent, average_price: Decimal) -> Decimal:
+    def _tp1_for_fill(
+        intent: ExecutionIntent, average_price: Decimal
+    ) -> Decimal | None:
         """Derive the 1R tranche from the actual weighted fill price.
 
         A limit entry may fill anywhere inside the approved interval.  Using a
@@ -1020,6 +1018,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
         follows the real fill price.
         """
 
+        if intent.tp1_price is None:
+            return None
         if average_price <= 0:
             return intent.tp1_price
         risk_distance = abs(average_price - intent.stop_price)
@@ -1030,6 +1030,23 @@ class BinanceUSDMarketClient(ExchangeGateway):
             return candidate if candidate < intent.tp2_price else intent.tp1_price
         candidate = average_price - risk_distance
         return candidate if candidate > intent.tp2_price else intent.tp1_price
+
+    @staticmethod
+    def _validate_take_profit_geometry(
+        intent: ExecutionIntent, tp1_price: Decimal | None
+    ) -> None:
+        """Fail before any cancellation when TP tranche ordering is unsafe."""
+
+        if tp1_price is None:
+            return
+        if intent.side == PositionSide.LONG and tp1_price >= intent.tp2_price:
+            raise ExchangeError(
+                "take-profit invariant violated: LONG requires TP1 below TP2"
+            )
+        if intent.side == PositionSide.SHORT and intent.tp2_price >= tp1_price:
+            raise ExchangeError(
+                "take-profit invariant violated: SHORT requires TP2 below TP1"
+            )
 
     async def close_position_market(self, position: PositionState, reason: str) -> OrderState:
         return await self.close_position_quantity_market(position, position.quantity, reason)

@@ -918,6 +918,15 @@ class TradingCycle:
         if action.action == PortfolioPlanActionType.TIGHTEN_STOP:
             if position is None or action.stop_price is None:
                 raise ExchangeError("portfolio tighten-stop position is missing")
+            # A stop-only adjustment must not disturb TP tranche quantities or
+            # recreate TP1 after it has filled.  Rebuild the full protection
+            # set only when the model also requested a valid TP2 update.
+            if "take_profit_updated" not in action.reasons:
+                return self._tag_portfolio_orders(
+                    [await self.exchange.tighten_stop(position, action.stop_price)],
+                    action,
+                    decision,
+                )
             protection_intent = self._protection_intent(
                 action,
                 position,
@@ -1086,9 +1095,9 @@ class TradingCycle:
             if position.side == PositionSide.LONG
             else entry - risk * Decimal("2")
         )
-        tp1 = position.tp1_price or (
-            entry + risk if position.side == PositionSide.LONG else entry - risk
-        )
+        tp1 = position.tp1_price
+        if tp1 is None and position.tp2_price is None:
+            tp1 = entry + risk if position.side == PositionSide.LONG else entry - risk
         intent_id = uuid5(
             NAMESPACE_URL,
             f"portfolio-protection:{decision_id}:{action.action_id}",

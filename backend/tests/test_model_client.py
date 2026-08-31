@@ -159,6 +159,55 @@ async def test_balanced_portfolio_prompt_is_not_trigger_only(tmp_path: object) -
 
 
 @pytest.mark.asyncio
+async def test_portfolio_prompt_defines_flat_as_immediate_close_not_hold(
+    tmp_path: object,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "UNCERTAIN",
+            "portfolio_risk_budget_fraction": 0,
+            "allocations": [
+                {
+                    "symbol": "BTCUSDT",
+                    "target_side": "FLAT",
+                    "allocation_fraction": 0,
+                    "priority": 1,
+                    "confidence": 0.7,
+                    "entry_min": None,
+                    "entry_max": None,
+                    "stop_price": None,
+                    "target_price": None,
+                    "thesis": "立即全部平仓",
+                    "reason_codes": ["THESIS_INVALIDATED"],
+                    "risk_flags": [],
+                }
+            ],
+            "summary": "平仓退出",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    client = ResponsesModelClient(model_settings(tmp_path), transport=httpx.MockTransport(handler))
+    try:
+        await client.analyze_portfolio(
+            [],
+            [position(symbol="BTCUSDT")],
+            datetime.now(UTC) + timedelta(minutes=15),
+        )
+    finally:
+        await client.close()
+
+    system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
+    assert "唯一含义是：本周期立即按市价全部平仓" in system_text
+    assert "绝不表示“保持仓位”" in system_text
+    assert "必须返回与当前仓位相同的 LONG/SHORT 方向" in system_text
+    assert "包括已有仓位和新开仓目标，不只是新增风险" in system_text
+
+
+@pytest.mark.asyncio
 async def test_relay_output_message_text_is_parsed_without_repair(tmp_path: object) -> None:
     calls = 0
 
@@ -244,7 +293,7 @@ async def test_portfolio_response_is_structured_and_identity_is_stable(tmp_path:
     assert first.decision_id == second.decision_id
     assert first.allocations[0].allocation_id == second.allocations[0].allocation_id
     assert first.model_name == "gpt-5.6"
-    assert first.prompt_version == "portfolio-v1"
+    assert first.prompt_version == "portfolio-v1.1"
     assert captured[0]["text"]["format"]["name"] == "portfolio_decision"  # type: ignore[index]
     payload_text = json.dumps(captured[0])
     assert "equity" not in payload_text
@@ -314,6 +363,122 @@ async def test_portfolio_short_geometry_is_repaired_instead_of_reaching_compiler
     assert decision.allocations[0].target_side.value == "SHORT"
     assert decision.allocations[0].target_price < decision.allocations[0].entry_min
     assert decision.allocations[0].entry_max < decision.allocations[0].stop_price
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalid_allocation", "expected_detail"),
+    [
+        (
+            {
+                "symbol": "TUTUSDT",
+                "target_side": "SHORT",
+                "allocation_fraction": 0.25,
+                "priority": 3,
+                "confidence": 0.86,
+                "entry_min": "0.0398",
+                "entry_max": "0.0402",
+                "stop_price": "0.0387",
+                "target_price": "0.0440",
+                "thesis": "错误的空头价格结构",
+                "reason_codes": [],
+                "risk_flags": [],
+            },
+            "allocations.2:value_error:Value error, SHORT geometry requires",
+        ),
+        (
+            {
+                "symbol": "TUTUSDT",
+                "target_side": "SHORT",
+                "allocation_fraction": 0.25,
+                "priority": 3,
+                "confidence": 0.86,
+                "entry_min": "0.0398",
+                "entry_max": "0.0402",
+                "stop_price": "0.0413",
+                "thesis": "缺少目标价格",
+                "reason_codes": [],
+                "risk_flags": [],
+            },
+            "allocations.2:value_error:Value error, non-flat allocation requires "
+            "entry_min, entry_max, stop_price, and target_price (missing: target_price)",
+        ),
+        (
+            {
+                "symbol": "TUTUSDT",
+                "target_side": "SIDEWAYS",
+                "allocation_fraction": 0.25,
+                "priority": 3,
+                "confidence": 0.86,
+                "entry_min": "0.0398",
+                "entry_max": "0.0402",
+                "stop_price": "0.0413",
+                "target_price": "0.0368",
+                "thesis": "非法方向",
+                "reason_codes": [],
+                "risk_flags": [],
+            },
+            "allocations.2.target_side:enum",
+        ),
+    ],
+)
+async def test_portfolio_repair_receives_specific_first_validation_error(
+    tmp_path: object,
+    invalid_allocation: dict[str, object],
+    expected_detail: str,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+    flat = {
+        "target_side": "FLAT",
+        "allocation_fraction": 0,
+        "priority": 1,
+        "confidence": 0.7,
+        "entry_min": None,
+        "entry_max": None,
+        "stop_price": None,
+        "target_price": None,
+        "thesis": "保持空仓",
+        "reason_codes": [],
+        "risk_flags": [],
+    }
+    invalid = {
+        "market_regime": "TRENDING",
+        "portfolio_risk_budget_fraction": 0.4,
+        "allocations": [
+            {**flat, "symbol": "BTCUSDT"},
+            {**flat, "symbol": "ETHUSDT", "priority": 2},
+            invalid_allocation,
+        ],
+        "summary": "首次输出需要修复",
+        "expires_at": expires_at.isoformat(),
+    }
+    repaired = {
+        **invalid,
+        "portfolio_risk_budget_fraction": 0,
+        "allocations": [
+            {**flat, "symbol": "BTCUSDT"},
+            {**flat, "symbol": "ETHUSDT", "priority": 2},
+            {**flat, "symbol": "TUTUSDT", "priority": 3},
+        ],
+        "summary": "已修复为完整合法输出",
+    }
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = invalid if len(captured) == 1 else repaired
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    client = ResponsesModelClient(model_settings(tmp_path), transport=httpx.MockTransport(handler))
+    try:
+        result = await client.analyze_portfolio([], [], expires_at)
+    finally:
+        await client.close()
+
+    assert result.summary == "已修复为完整合法输出"
+    repair_text = captured[1]["input"][-1]["content"][0]["text"]  # type: ignore[index]
+    assert "具体错误" in repair_text
+    assert expected_detail in repair_text
 
 
 @pytest.mark.asyncio

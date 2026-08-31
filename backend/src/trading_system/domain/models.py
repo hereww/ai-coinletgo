@@ -449,7 +449,10 @@ class ExecutionIntent(BaseModel):
     entry_min: PositiveDecimal
     entry_max: PositiveDecimal
     stop_price: PositiveDecimal
-    tp1_price: PositiveDecimal
+    # ``None`` means the first take-profit tranche has already completed and
+    # only TP2 should remain.  New entries always provide TP1; existing
+    # positions may legitimately enter the TP2-only stage.
+    tp1_price: PositiveDecimal | None = None
     tp2_price: PositiveDecimal
     trailing_atr_multiple: Decimal = Decimal("1.5")
     leverage: int = Field(ge=1, le=30)
@@ -459,6 +462,11 @@ class ExecutionIntent(BaseModel):
     def validate_entry_guard(self) -> ExecutionIntent:
         if not self.entry_min <= self.limit_price <= self.entry_max:
             raise ValueError("limit price must be inside the approved entry range")
+        if self.tp1_price is not None:
+            if self.side == PositionSide.LONG and self.tp1_price >= self.tp2_price:
+                raise ValueError("LONG take-profit geometry requires tp1_price < tp2_price")
+            if self.side == PositionSide.SHORT and self.tp2_price >= self.tp1_price:
+                raise ValueError("SHORT take-profit geometry requires tp2_price < tp1_price")
         return self
 
 

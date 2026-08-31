@@ -311,11 +311,25 @@ class PortfolioCompiler:
         delta_risk = abs(target_risk - current_risk)
         deadband = risk_cap * limits.portfolio_rebalance_deadband_fraction
         tighten = stop != position.stop_price
+        target_error = self._existing_target_error(allocation, position)
+        if target_error is not None and target_quantity > position.quantity:
+            return self._rejected(allocation, target_error, position)
+        effective_allocation = (
+            allocation
+            if target_error is None
+            else allocation.model_copy(update={"target_price": position.tp2_price})
+        )
+        ignored_target_reasons = (
+            ["take_profit_target_not_beyond_tp1_ignored"]
+            if target_error is not None
+            else []
+        )
         # A portfolio decision may keep quantity unchanged while moving the
         # final take-profit target.  Treat that as a protection update so the
         # execution layer re-compiles both TP tranches on the exchange.
         target_changed = (
-            allocation.target_price is not None
+            target_error is None
+            and allocation.target_price is not None
             and (
                 position.tp2_price is None
                 or allocation.target_price != position.tp2_price
@@ -335,8 +349,9 @@ class PortfolioCompiler:
                     reasons.append("hard_stop_tightened")
                 if target_changed:
                     reasons.append("take_profit_updated")
+                reasons.extend(ignored_target_reasons)
                 return self._action(
-                    allocation,
+                    effective_allocation,
                     PortfolioPlanActionType.TIGHTEN_STOP,
                     position,
                     target_quantity=position.quantity,
@@ -345,26 +360,26 @@ class PortfolioCompiler:
                     reasons=reasons,
                 )
             return self._action(
-                allocation,
+                effective_allocation,
                 PortfolioPlanActionType.HOLD,
                 position,
                 target_quantity=position.quantity,
                 target_risk=current_risk,
                 stop=stop,
-                reasons=["target_inside_rebalance_deadband"],
+                reasons=["target_inside_rebalance_deadband", *ignored_target_reasons],
             )
         if target_quantity < position.quantity:
             return self._action(
-                allocation,
+                effective_allocation,
                 PortfolioPlanActionType.REDUCE,
                 position,
                 target_quantity=target_quantity,
                 target_risk=target_risk,
                 stop=stop,
-                reasons=["target_risk_reduced"],
+                reasons=["target_risk_reduced", *ignored_target_reasons],
             )
         return self._action(
-            allocation,
+            effective_allocation,
             PortfolioPlanActionType.ADD,
             position,
             target_quantity=target_quantity,
@@ -592,6 +607,27 @@ class PortfolioCompiler:
         elif proposed > position.stop_price or proposed <= snapshot.mid_price:
             return None
         return proposed
+
+    @staticmethod
+    def _existing_target_error(
+        allocation: PortfolioAllocation, position: PositionState
+    ) -> str | None:
+        """Reject a final target that collides with or crosses the first tranche.
+
+        TP2 may move closer or farther as the model re-evaluates the market,
+        but it must remain beyond TP1 in the profitable direction.  If TP1 has
+        already filled, the entry price is the minimum ordering boundary.
+        """
+
+        target = allocation.target_price
+        if target is None:
+            return "take_profit_target_missing"
+        boundary = position.tp1_price or position.entry_price
+        if position.side == PositionSide.LONG and target <= boundary:
+            return "take_profit_target_not_beyond_tp1"
+        if position.side == PositionSide.SHORT and target >= boundary:
+            return "take_profit_target_not_beyond_tp1"
+        return None
 
     def _net_reward_risk(
         self, entry: Decimal, allocation: PortfolioAllocation, snapshot: MarketSnapshot

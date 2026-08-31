@@ -66,6 +66,7 @@ class FakeExchange:
         self.protection_quantities: list[Decimal] = []
         self.protection_intents: list[ExecutionIntent] = []
         self.canceled: list[str] = []
+        self.tightened: list[tuple[str, Decimal]] = []
 
     async def get_positions(self):
         return [] if self.remaining is None else [self.remaining]
@@ -80,6 +81,10 @@ class FakeExchange:
 
     async def cancel_position_protection(self, position):
         self.canceled.append(position.symbol)
+
+    async def tighten_stop(self, position, new_stop):
+        self.tightened.append((position.symbol, new_stop))
+        return _order("STOP_MARKET").model_copy(update={"stop_price": new_stop})
 
     async def best_entry_price(self, symbol: str, side: str) -> Decimal:
         del symbol, side
@@ -212,3 +217,70 @@ async def test_full_close_cancels_all_remaining_protection() -> None:
     assert len(result) == 1
     assert exchange.protection_quantities == []
     assert exchange.canceled == ["BTCUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_stop_only_portfolio_update_preserves_take_profit_orders() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        stop_price=Decimal("98"),
+        tp1_price=Decimal("102"),
+        tp2_price=Decimal("108"),
+    )
+    action = PortfolioPlanAction(
+        action_id=uuid4(),
+        allocation_id=uuid4(),
+        symbol=current.symbol,
+        action=PortfolioPlanActionType.TIGHTEN_STOP,
+        side=current.side,
+        current_quantity=current.quantity,
+        target_quantity=current.quantity,
+        target_risk_usdt=current.initial_risk_usdt,
+        stop_price=Decimal("99"),
+        target_price=current.tp2_price,
+        confidence=Decimal("0.9"),
+        priority=1,
+        reasons=["hard_stop_tightened"],
+    )
+    exchange = FakeExchange(current)
+
+    result = await _cycle(exchange)._execute_portfolio_action(
+        action, {current.symbol: current}, _decision()
+    )
+
+    assert len(result) == 1
+    assert exchange.tightened == [("BTCUSDT", Decimal("99"))]
+    assert exchange.protection_intents == []
+
+
+def test_portfolio_target_update_does_not_recreate_completed_tp1() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        stop_price=Decimal("100.2"),
+        tp1_price=None,
+        tp2_price=Decimal("108"),
+    )
+    action = PortfolioPlanAction(
+        action_id=uuid4(),
+        allocation_id=uuid4(),
+        symbol=current.symbol,
+        action=PortfolioPlanActionType.TIGHTEN_STOP,
+        side=current.side,
+        current_quantity=current.quantity,
+        target_quantity=current.quantity,
+        target_risk_usdt=current.initial_risk_usdt,
+        stop_price=current.stop_price,
+        target_price=Decimal("110"),
+        confidence=Decimal("0.9"),
+        priority=1,
+        reasons=["take_profit_updated"],
+    )
+
+    intent = _cycle(FakeExchange(current))._protection_intent(
+        action, current, decision_id=_decision().decision_id
+    )
+
+    assert intent.tp1_price is None
+    assert intent.tp2_price == Decimal("110")

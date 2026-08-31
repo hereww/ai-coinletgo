@@ -270,6 +270,13 @@ stop_price、target_price，四个字段均不得为 null；价格关系必须�
 如果无法给出完整价格结构，请把该合约设为 FLAT 或省略该新候选，而不是返回半成品开仓意图。
 已有仓位必须每个都返回一次。已有仓位只能 HOLD、减仓、平仓或收紧止损，不能在同一决策中直接反向。
 新候选可以省略；省略表示不新开仓。target_side 为 FLAT 时 allocation_fraction 必须为 0。
+对已有仓位，target_side=FLAT 且 allocation_fraction=0 的唯一含义是：本周期立即按市价全部平仓；
+它绝不表示“保持仓位”“保持保护单”“不加仓”或“暂不增加风险”。如果判断已有仓位应继续持有，
+必须返回与当前仓位相同的 LONG/SHORT 方向和正数 allocation_fraction，并填写完整价格结构；
+如果只想保持数量、收紧止损或调整止盈，也必须使用当前方向，不能使用 FLAT。
+portfolio_risk_budget_fraction 覆盖本周期全部目标风险，包括已有仓位和新开仓目标，不只是新增风险；
+每个 allocation_fraction 表示该组合总风险预算中该合约的目标份额。summary、thesis 中出现“保持止损”、
+“继续持有”或“不增加仓位”时，对应已有仓位不得输出 FLAT。
 风险证据冲突、行情过期、流动性不足或市场不确定时优先返回零风险预算或 FLAT。
 候选列表包含经过基础流动性与数据安全筛选的观察名单，其中部分合约可能尚未出现15分钟触发。
 15分钟突破/回踩是优先确认项，但不是唯一入场门槛：当1小时和4小时方向一致、ADX和流动性
@@ -472,6 +479,21 @@ class ResponsesModelClient:
                 ) from first_error
             repair = self._portfolio_payload(
                 candidates, positions, cycle_expires_at, portfolio_context or {}, strict=False
+            )
+            repair["input"].append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "上一份组合 JSON 未通过本地校验。请根据下面的具体错误修正，"
+                                "重新返回完整 JSON，不要解释、不要省略未报错字段。"
+                                f" 校验错误：{self._schema_failure_detail(first_error)}"
+                            ),
+                        }
+                    ],
+                }
             )
             try:
                 response = await self._post(
@@ -962,8 +984,12 @@ class ResponsesModelClient:
             for item in error.errors(include_url=False)[:6]:
                 location = ".".join(str(part) for part in item.get("loc", ())) or "root"
                 error_type = str(item.get("type", "validation_error"))
-                details.append(f"{location}:{error_type}")
-            return "validation[" + ",".join(details) + "]"
+                message = " ".join(str(item.get("msg", "")).split())[:150]
+                detail = f"{location}:{error_type}"
+                if message:
+                    detail += f":{message}"
+                details.append(detail)
+            return ("validation[" + ",".join(details) + "]")[:180]
         if isinstance(error, json.JSONDecodeError):
             return "invalid_json"
         if isinstance(error, KeyError):
