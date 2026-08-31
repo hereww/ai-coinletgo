@@ -208,6 +208,132 @@ async def test_portfolio_prompt_defines_flat_as_immediate_close_not_hold(
 
 
 @pytest.mark.asyncio
+async def test_portfolio_prompt_and_context_define_existing_tp2_boundary(
+    tmp_path: object,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "TRENDING",
+            "portfolio_risk_budget_fraction": 0.4,
+            "allocations": [
+                {
+                    "symbol": "DOGEUSDT",
+                    "target_side": "SHORT",
+                    "allocation_fraction": 1,
+                    "priority": 1,
+                    "confidence": 0.8,
+                    "entry_min": "0.0800",
+                    "entry_max": "0.0810",
+                    "stop_price": "0.0830",
+                    "target_price": "0.0770",
+                    "thesis": "沿用有效的最终止盈",
+                    "reason_codes": ["HOLD_EXISTING_POSITION"],
+                    "risk_flags": [],
+                }
+            ],
+            "summary": "继续持有空头",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    current = position(
+        symbol="DOGEUSDT",
+        side="SHORT",
+        entry_price=Decimal("0.0810"),
+        mark_price=Decimal("0.0800"),
+        stop_price=Decimal("0.0830"),
+        tp1_price=Decimal("0.0790"),
+        tp2_price=Decimal("0.0770"),
+        tp1_completed=False,
+    )
+    client = ResponsesModelClient(
+        model_settings(tmp_path), transport=httpx.MockTransport(handler)
+    )
+    try:
+        await client.analyze_portfolio(
+            [], [current], datetime.now(UTC) + timedelta(minutes=15)
+        )
+    finally:
+        await client.close()
+
+    system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
+    assert "target_price 表示最终止盈 TP2，不是第一档止盈 TP1" in system_text
+    assert "LONG 的新 TP2 必须严格高于现有 TP1" in system_text
+    assert "SHORT 的新 TP2" in system_text
+    assert "必须严格低于现有 TP1" in system_text
+    assert "必须原样沿用当前 tp2_price" in system_text
+
+    context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
+    sent_position = context["positions"][0]
+    assert sent_position["tp1_price"] == "0.0790"
+    assert sent_position["tp2_price"] == "0.0770"
+    assert sent_position["tp1_completed"] is False
+    assert sent_position["tp2_ordering_boundary"] == "0.0790"
+    assert sent_position["tp2_required_relation"] == "below_boundary"
+
+
+@pytest.mark.asyncio
+async def test_portfolio_context_uses_entry_as_tp2_boundary_after_tp1_completion(
+    tmp_path: object,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "TRENDING",
+            "portfolio_risk_budget_fraction": 0.5,
+            "allocations": [
+                {
+                    "symbol": "BTCUSDT",
+                    "target_side": "LONG",
+                    "allocation_fraction": 1,
+                    "priority": 1,
+                    "confidence": 0.82,
+                    "entry_min": "99",
+                    "entry_max": "101",
+                    "stop_price": "98",
+                    "target_price": "106",
+                    "thesis": "第一档已完成，保留最终止盈",
+                    "reason_codes": ["TP1_COMPLETED"],
+                    "risk_flags": [],
+                }
+            ],
+            "summary": "继续持有多头",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    current = position(
+        symbol="BTCUSDT",
+        entry_price=Decimal("100"),
+        mark_price=Decimal("103"),
+        stop_price=Decimal("100.5"),
+        tp1_price=None,
+        tp2_price=Decimal("106"),
+        tp1_completed=True,
+    )
+    client = ResponsesModelClient(
+        model_settings(tmp_path), transport=httpx.MockTransport(handler)
+    )
+    try:
+        await client.analyze_portfolio(
+            [], [current], datetime.now(UTC) + timedelta(minutes=15)
+        )
+    finally:
+        await client.close()
+
+    context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
+    sent_position = context["positions"][0]
+    assert sent_position["tp1_completed"] is True
+    assert sent_position["tp2_ordering_boundary"] == "100"
+    assert sent_position["tp2_required_relation"] == "above_boundary"
+
+
+@pytest.mark.asyncio
 async def test_relay_output_message_text_is_parsed_without_repair(tmp_path: object) -> None:
     calls = 0
 
@@ -293,7 +419,7 @@ async def test_portfolio_response_is_structured_and_identity_is_stable(tmp_path:
     assert first.decision_id == second.decision_id
     assert first.allocations[0].allocation_id == second.allocations[0].allocation_id
     assert first.model_name == "gpt-5.6"
-    assert first.prompt_version == "portfolio-v1.1"
+    assert first.prompt_version == "portfolio-v1.2"
     assert captured[0]["text"]["format"]["name"] == "portfolio_decision"  # type: ignore[index]
     payload_text = json.dumps(captured[0])
     assert "equity" not in payload_text

@@ -274,6 +274,13 @@ stop_price、target_price，四个字段均不得为 null；价格关系必须�
 它绝不表示“保持仓位”“保持保护单”“不加仓”或“暂不增加风险”。如果判断已有仓位应继续持有，
 必须返回与当前仓位相同的 LONG/SHORT 方向和正数 allocation_fraction，并填写完整价格结构；
 如果只想保持数量、收紧止损或调整止盈，也必须使用当前方向，不能使用 FLAT。
+对已有仓位，target_price 表示最终止盈 TP2，不是第一档止盈 TP1。必须读取 positions 中的
+tp1_completed、tp1_price、tp2_price、tp2_ordering_boundary 和 tp2_required_relation：
+当 tp1 尚未成交且 tp1_price 有值时，LONG 的新 TP2 必须严格高于现有 TP1，SHORT 的新 TP2
+必须严格低于现有 TP1；当 TP1 已成交或 tp1_price 为 null 时，以 entry_price 为顺序边界，
+LONG 的 TP2 必须严格高于入场价，SHORT 的 TP2 必须严格低于入场价。如果无法构造有效的新 TP2，
+且当前 tp2_price 仍符合该顺序，必须原样沿用当前 tp2_price；不得用碰撞或越过顺序边界的无效
+target_price 暗示继续持有、加仓或调整止盈。
 portfolio_risk_budget_fraction 覆盖本周期全部目标风险，包括已有仓位和新开仓目标，不只是新增风险；
 每个 allocation_fraction 表示该组合总风险预算中该合约的目标份额。summary、thesis 中出现“保持止损”、
 “继续持有”或“不增加仓位”时，对应已有仓位不得输出 FLAT。
@@ -843,6 +850,14 @@ class ResponsesModelClient:
         safe_positions = [
             {
                 **item.model_dump(mode="json"),
+                "tp2_ordering_boundary": str(
+                    item.tp1_price
+                    if not item.tp1_completed and item.tp1_price is not None
+                    else item.entry_price
+                ),
+                "tp2_required_relation": (
+                    "above_boundary" if item.side.value == "LONG" else "below_boundary"
+                ),
                 "stop_distance_r": str(
                     abs(item.mark_price - item.stop_price)
                     / max(abs(item.entry_price - item.stop_price), Decimal("0.00000001"))
