@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from trading_system.api.controller import SystemController
 from trading_system.api.schemas import (
     ConfigUpdateRequest,
+    IntegrationProbeRequest,
     LoginRequest,
     ManualEntryAdviceRequest,
     ManualEntryRequest,
@@ -193,7 +194,7 @@ async def integrations(service: Controller, _: CurrentUser) -> dict[str, Any]:
 
 @router.post("/integrations/probe")
 async def probe_integration(
-    payload: PasswordActionRequest,
+    payload: IntegrationProbeRequest,
     request: Request,
     user: MutatingUser,
     service: Controller,

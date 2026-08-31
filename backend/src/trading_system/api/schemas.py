@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -13,8 +13,21 @@ class LoginRequest(BaseModel):
 
 
 class PasswordActionRequest(BaseModel):
+    """Request body for sensitive actions guarded by the operator password.
+
+    Rejecting unknown fields is intentional: old clients must not be able to
+    send confirmation words or one-time codes that the server silently ignores.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     password: str = Field(default="", max_length=256)
-    target: str = Field(default="", max_length=20)
+
+
+class IntegrationProbeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: Literal["testnet", "model"]
 
 
 class ModelRelayUpdateRequest(BaseModel):
@@ -43,6 +56,8 @@ class ModelProfileSelectRequest(BaseModel):
 
 
 class ConfigUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     capital_limit_usdt: Decimal | None = Field(default=None, gt=0)
     single_trade_risk_pct: Decimal | None = Field(default=None, gt=0)
     portfolio_risk_pct: Decimal | None = Field(default=None, gt=0)
@@ -145,6 +160,8 @@ class ReplayRequest(BaseModel):
 
 
 class ReducePositionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     position_id: str = Field(min_length=1, max_length=120)
     fraction: Decimal = Field(gt=0, le=1)
     operation_id: str = Field(min_length=8, max_length=80)
@@ -159,6 +176,8 @@ class ReducePositionRequest(BaseModel):
 
 
 class ManualEntryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     operation_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9-]+$")
     symbol: str = Field(min_length=5, max_length=20)
     side: Literal["LONG", "SHORT"]

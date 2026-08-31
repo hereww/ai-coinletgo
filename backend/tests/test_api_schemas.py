@@ -5,10 +5,13 @@ from pydantic import ValidationError
 
 from trading_system.api.schemas import (
     ConfigUpdateRequest,
+    IntegrationProbeRequest,
     ManualEntryAdviceRequest,
     ManualEntryRequest,
     ModelProfileSelectRequest,
     ModelRelayUpdateRequest,
+    PasswordActionRequest,
+    ReducePositionRequest,
     ReplayRequest,
 )
 from trading_system.config import Settings
@@ -193,3 +196,52 @@ def test_manual_advice_uses_the_same_target_ordering_as_manual_entry() -> None:
             tp2_r="2",
             leverage=3,
         )
+
+
+@pytest.mark.parametrize(
+    ("request_model", "payload"),
+    [
+        (PasswordActionRequest, {"password": "operator-password", "legacy_phrase": "old"}),
+        (PasswordActionRequest, {"password": "operator-password", "legacy_code": "000000"}),
+        (
+            ConfigUpdateRequest,
+            {"max_leverage": 3, "confirmation": "RUN CYCLE"},
+        ),
+        (
+            ReducePositionRequest,
+            {
+                "position_id": "binance-BTCUSDT-LONG",
+                "fraction": "0.5",
+                "operation_id": "reduce-123",
+                "password": "operator-password",
+                "legacy_code": "000000",
+            },
+        ),
+        (
+            ManualEntryRequest,
+            {
+                "operation_id": "manual-entry-123",
+                "symbol": "BTCUSDT",
+                "side": "LONG",
+                "leverage": 2,
+                "stop_distance_pct": "1",
+                "tp1_r": "1",
+                "tp2_r": "2",
+                "password": "operator-password",
+                "legacy_phrase": "old",
+            },
+        ),
+    ],
+)
+def test_sensitive_requests_reject_legacy_confirmation_fields(
+    request_model: type[object], payload: dict[str, object]
+) -> None:
+    with pytest.raises(ValidationError):
+        request_model(**payload)  # type: ignore[call-arg]
+
+
+def test_integration_probe_request_has_no_password_or_legacy_confirmation_fields() -> None:
+    request = IntegrationProbeRequest(target="testnet")
+    assert request.target == "testnet"
+    with pytest.raises(ValidationError):
+        IntegrationProbeRequest(target="testnet", legacy_code="000000")

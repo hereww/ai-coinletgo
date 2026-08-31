@@ -86,7 +86,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ profile_id: profileId }),
     }),
-  updateConfig: (payload: Partial<RiskConfig> & { password?: string }) =>
+  updateConfig: (payload: Partial<RiskConfig> & { password: string }) =>
     request<RiskConfig>('/api/v1/config', { method: 'PATCH', body: JSON.stringify(payload) }),
   pause: () => request<{ mode: string }>('/api/v1/actions/pause', { method: 'POST' }),
   runCycle: (password: string) => request<{ status: string; operation_id: string }>('/api/v1/actions/run-cycle', {
