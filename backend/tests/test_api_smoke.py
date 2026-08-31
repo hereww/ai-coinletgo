@@ -23,6 +23,8 @@ def test_api_starts_in_locked_down_unconfigured_state() -> None:
         assert body["metrics"]["equity"] == "0.00"
         assert body["positions"] == []
         assert body["signals"] == []
+        assert body["entries_enabled"] is True
+        assert body["halt_reason"] is None
         assert body["health"]["ready"] is False
 
         integrations = client.get("/api/v1/integrations")
@@ -32,6 +34,10 @@ def test_api_starts_in_locked_down_unconfigured_state() -> None:
         assert integrations.json()["model"]["api_key_configured"] is False
         assert integrations.json()["proxy"]["enabled"] is False
         assert integrations.json()["proxy"]["configured"] is False
+
+        config = client.get("/api/v1/config")
+        assert config.status_code == 200
+        assert config.json()["strategy_profile"] == "trend_following"
 
         resume = client.post(
             "/api/v1/actions/resume-testnet",

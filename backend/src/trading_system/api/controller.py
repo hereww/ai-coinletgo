@@ -549,12 +549,13 @@ class SystemController:
         return (value / tick).to_integral_value(rounding=rounding) * tick
 
     async def dashboard(self) -> dict[str, Any]:
-        mode = await self.repository.get_mode(
+        mode_state = await self.repository.get_mode_state(
             SystemMode.TESTNET
             if self.settings.binance_environment == "testnet"
             else SystemMode.LIVE_LOCKED,
             self.settings.binance_environment,
         )
+        mode = SystemMode(str(mode_state["mode"]))
         report = await self.health()
         initial_risk = Decimal("0")
         position_count = 0
@@ -600,6 +601,9 @@ class SystemController:
         return {
             "mode": mode.value,
             "environment": self.settings.binance_environment,
+            "entries_enabled": bool(mode_state.get("entries_enabled", False)),
+            "halt_reason": mode_state.get("halt_reason"),
+            "mode_updated_at": mode_state.get("updated_at"),
             "metrics": metrics,
             "equity_curve": curve,
             "risk_capacity": {

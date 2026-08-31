@@ -183,6 +183,7 @@
 .checkbox-row input { accent-color: var(--green); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .inline-error, .success-note { padding: 9px 10px; border: 1px solid var(--red-border); border-radius: 5px; background: var(--red-soft); color: var(--red); font-size: 11px; line-height: 1.4; }
+.inline-warning { padding: 9px 10px; border: 1px solid var(--amber-border); border-radius: 5px; background: var(--amber-soft); color: var(--text-subtle); font-size: 11px; line-height: 1.4; }
 .cycle-status { display: grid; gap: 3px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); color: var(--muted); font-size: 11px; line-height: 1.4; }
 .cycle-status strong { color: var(--text); font-size: 12px; }
 .cycle-status small { color: var(--faint); }

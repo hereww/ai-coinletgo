@@ -179,6 +179,7 @@ async def get_config(app_settings: AppSettings, _: CurrentUser) -> dict[str, Any
         "entry_symbols": app_settings.entry_symbols,
         "model_name": app_settings.active_model_name,
         "model_daily_request_limit": app_settings.model_daily_request_limit,
+        "strategy_profile": app_settings.strategy_profile,
         "portfolio_strategy_enabled": app_settings.portfolio_strategy_enabled,
         "portfolio_rebalance_deadband_fraction": app_settings.portfolio_rebalance_deadband_fraction,
         "portfolio_rebalance_cooldown_minutes": app_settings.portfolio_rebalance_cooldown_minutes,

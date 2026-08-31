@@ -88,6 +88,7 @@ export default function DashboardPage() {
           <span>{cycleStatus.detail}</span>
           <small>快照 {cycleStatus.snapshots} · 候选 {cycleStatus.candidates} · 模型输出 {cycleStatus.signals} · 执行 {cycleStatus.executed}</small>
         </div>
+        {data.halt_reason ? <div className="inline-warning" role="status">系统暂停原因：{data.halt_reason}</div> : null}
       </div>
 
       <MetricStrip metrics={data.metrics} />

@@ -406,6 +406,40 @@ class Repository:
                 await session.commit()
             return SystemMode(record.mode)
 
+    async def get_mode_state(
+        self,
+        default: SystemMode = SystemMode.TESTNET,
+        environment: str = "testnet",
+    ) -> dict[str, Any]:
+        """Return the persisted mode together with its safety explanation.
+
+        The dashboard previously exposed only ``mode``.  That made a paused
+        system look indistinguishable from a model or worker interruption even
+        when the persisted halt reason already identified the real blocker.
+        Keep the normal ``get_mode`` behavior (including environment-change
+        reconciliation) and then return a small read-only state envelope.
+        """
+
+        await self.get_mode(default, environment)
+        async with self.database.sessions() as session:
+            record = await session.get(SystemStateRecord, 1)
+            if record is None:
+                return {
+                    "mode": default.value,
+                    "environment": environment,
+                    "entries_enabled": default
+                    in {SystemMode.TESTNET, SystemMode.LIVE_ENABLED},
+                    "halt_reason": None,
+                    "updated_at": None,
+                }
+            return {
+                "mode": record.mode,
+                "environment": record.environment,
+                "entries_enabled": record.entries_enabled,
+                "halt_reason": record.halt_reason,
+                "updated_at": record.updated_at,
+            }
+
     async def set_mode(self, mode: SystemMode, *, halt_reason: str | None = None) -> SystemMode:
         async with self.database.sessions() as session:
             record = await session.get(SystemStateRecord, 1)

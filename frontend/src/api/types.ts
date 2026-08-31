@@ -94,6 +94,9 @@ export interface Signal {
 export interface DashboardData {
   mode: SystemMode
   environment: 'testnet' | 'live'
+  entries_enabled: boolean
+  halt_reason: string | null
+  mode_updated_at: string | null
   metrics: {
     equity: string
     daily_pnl: string
@@ -155,6 +158,7 @@ export interface RiskConfig {
   max_stop_atr: number
   entry_symbols: string[]
   model_name: string
+  strategy_profile?: 'conservative' | 'balanced' | 'trend_following' | 'scalping'
   model_daily_request_limit: number
   portfolio_strategy_enabled: boolean
   portfolio_rebalance_deadband_fraction: number
