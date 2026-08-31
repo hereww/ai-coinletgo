@@ -225,10 +225,8 @@ class PositionProtectionMonitor:
         incomplete_take_profits = [
             position
             for position in positions
-            # If only TP2 remains, TP1 has likely already filled and must not
-            # be recreated behind the current market.  A missing TP2, or no
-            # TP orders at all, is the repairable state.
             if position.tp2_price is None
+            or (not position.tp1_completed and position.tp1_price is None)
         ]
         if not hasattr(self.exchange, "upsert_protection") or not hasattr(
             self.exchange, "get_filters"
@@ -397,11 +395,10 @@ class PositionProtectionMonitor:
         risk = abs(position.entry_price - position.stop_price)
         if risk <= 0:
             raise ExchangeError("cannot repair take-profit protection without stop distance")
-        tp1_completed = PositionProtectionMonitor._tp1_likely_completed(position)
         if position.side == PositionSide.LONG:
             tp1 = (
                 None
-                if tp1_completed
+                if position.tp1_completed
                 else position.tp1_price or position.entry_price + risk
             )
             default_tp2 = position.entry_price + risk * Decimal("2")
@@ -411,7 +408,7 @@ class PositionProtectionMonitor:
         else:
             tp1 = (
                 None
-                if tp1_completed
+                if position.tp1_completed
                 else position.tp1_price or position.entry_price - risk
             )
             default_tp2 = position.entry_price - risk * Decimal("2")
@@ -440,29 +437,15 @@ class PositionProtectionMonitor:
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
 
-    @staticmethod
-    def _tp1_likely_completed(position: PositionState) -> bool:
-        """Infer the TP2-only stage from the persisted original quantity.
-
-        Binance can briefly omit the surviving TP2 after TP1 fills.  A normal
-        first tranche closes 40%, leaving about 60%; treating that state as a
-        fresh position would recreate an already-completed TP1.
-        """
-
-        return bool(
-            position.tp1_price is None
-            and position.initial_quantity is not None
-            and position.quantity
-            <= position.initial_quantity * Decimal("0.65")
-        )
-
     async def _resume_testnet_after_verified_repair(
         self, positions: list[PositionState]
     ) -> None:
         if self.settings.binance_environment != "testnet":
             return
         if not positions or any(
-            not position.protected or position.tp2_price is None
+            not position.protected
+            or position.tp2_price is None
+            or (not position.tp1_completed and position.tp1_price is None)
             for position in positions
         ):
             return

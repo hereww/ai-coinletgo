@@ -261,6 +261,7 @@ def test_portfolio_target_update_does_not_recreate_completed_tp1() -> None:
         stop_price=Decimal("100.2"),
         tp1_price=None,
         tp2_price=Decimal("108"),
+        tp1_completed=True,
     )
     action = PortfolioPlanAction(
         action_id=uuid4(),
@@ -284,3 +285,41 @@ def test_portfolio_target_update_does_not_recreate_completed_tp1() -> None:
 
     assert intent.tp1_price is None
     assert intent.tp2_price == Decimal("110")
+
+
+def test_portfolio_reduce_recreates_tp1_when_exchange_reports_cancellation() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("6"),
+        initial_quantity=Decimal("10"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("99"),
+        tp1_price=None,
+        tp2_price=None,
+        tp1_completed=False,
+    )
+    action = PortfolioPlanAction(
+        action_id=uuid4(),
+        allocation_id=uuid4(),
+        symbol=current.symbol,
+        action=PortfolioPlanActionType.REDUCE,
+        side=current.side,
+        current_quantity=Decimal("10"),
+        target_quantity=current.quantity,
+        quantity_delta=Decimal("4"),
+        target_risk_usdt=current.initial_risk_usdt,
+        stop_price=current.stop_price,
+        target_price=Decimal("104"),
+        confidence=Decimal("0.9"),
+        priority=1,
+        reasons=["target_quantity_reduced"],
+    )
+
+    intent = _cycle(FakeExchange(current))._protection_intent(
+        action, current, decision_id=_decision().decision_id
+    )
+
+    assert intent.tp1_price == Decimal("101")
+    assert intent.tp2_price == Decimal("104")

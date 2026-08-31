@@ -65,6 +65,58 @@ async def test_hydration_preserves_original_risk_after_stop_tightening(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_hydration_preserves_verified_tp1_stage_while_algo_snapshot_is_unknown(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'tp-stage.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    previous = position(
+        tp1_price=None,
+        tp2_price=Decimal("104"),
+        tp1_completed=True,
+    )
+    await repository.sync_positions([previous])
+    unknown = position(
+        tp1_price=None,
+        tp2_price=None,
+        tp1_completed=False,
+        tp1_status_known=False,
+    )
+    try:
+        hydrated = (await repository.hydrate_positions([unknown]))[0]
+    finally:
+        await database.dispose()
+    assert hydrated.tp1_completed is True
+
+
+@pytest.mark.asyncio
+async def test_hydration_resets_tp1_stage_when_full_protection_reappears(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'tp-stage-reset.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    previous = position(
+        tp1_price=None,
+        tp2_price=Decimal("104"),
+        tp1_completed=True,
+    )
+    await repository.sync_positions([previous])
+    rebuilt = position(
+        tp1_price=Decimal("102"),
+        tp2_price=Decimal("104"),
+        tp1_completed=False,
+        tp1_status_known=True,
+    )
+    try:
+        hydrated = (await repository.hydrate_positions([rebuilt]))[0]
+    finally:
+        await database.dispose()
+    assert hydrated.tp1_completed is False
+
+
+@pytest.mark.asyncio
 async def test_signal_api_rows_normalize_thesis_to_reason(tmp_path: object) -> None:
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'signals.db'}")
     await database.create_schema()

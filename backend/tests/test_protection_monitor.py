@@ -297,7 +297,7 @@ async def test_missing_take_profits_are_rebuilt_and_synced() -> None:
     assert repository.synced[0].tp2_price == Decimal("104")
 
 
-def test_take_profit_repair_preserves_tp2_only_stage_after_first_tranche() -> None:
+def test_take_profit_repair_preserves_explicit_tp2_only_stage_after_first_tranche() -> None:
     current = position(
         position_id="binance-CYSUSDT-LONG",
         symbol="CYSUSDT",
@@ -309,12 +309,34 @@ def test_take_profit_repair_preserves_tp2_only_stage_after_first_tranche() -> No
         stop_price=Decimal("0.821"),
         tp1_price=None,
         tp2_price=None,
+        tp1_completed=True,
     )
 
     intent = PositionProtectionMonitor._repair_intent(current)
 
     assert intent.tp1_price is None
     assert intent.tp2_price == Decimal("0.8911999999999997")
+
+
+def test_ai_reduce_does_not_masquerade_as_completed_tp1() -> None:
+    current = position(
+        position_id="binance-CYSUSDT-LONG",
+        symbol="CYSUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("26"),
+        initial_quantity=Decimal("44"),
+        entry_price=Decimal("0.8444"),
+        mark_price=Decimal("0.8394"),
+        stop_price=Decimal("0.821"),
+        tp1_price=None,
+        tp2_price=None,
+        tp1_completed=False,
+    )
+
+    intent = PositionProtectionMonitor._repair_intent(current)
+
+    assert intent.tp1_price == Decimal("0.8678")
+    assert intent.tp2_price == Decimal("0.8912")
 
 
 @pytest.mark.asyncio
@@ -386,6 +408,7 @@ async def test_next_monitor_pass_resumes_after_exchange_exposes_repaired_tp2() -
         protected=True,
         tp1_price=None,
         tp2_price=Decimal("104"),
+        tp1_completed=True,
         current_r=Decimal("0"),
     )
 

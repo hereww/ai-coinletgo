@@ -305,6 +305,8 @@ async def test_signed_health_and_hedge_position_protection_parsing(tmp_path: obj
                     }
                 ],
             )
+        if request.url.path == "/fapi/v1/allAlgoOrders":
+            return httpx.Response(200, json={"orders": []})
         raise AssertionError(request.url)
 
     client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
@@ -1329,6 +1331,144 @@ async def test_get_positions_reads_algo_protection_only(tmp_path: object) -> Non
     assert positions[0].stop_price == Decimal("99")
     assert positions[0].tp1_price == Decimal("103")
     assert positions[0].tp2_price == Decimal("106")
+    assert positions[0].tp1_completed is False
+    assert positions[0].tp1_status_known is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("algo_status", "expected_completed"),
+    [("CANCELED", False), ("FINISHED", True)],
+)
+async def test_get_positions_resolves_missing_tp1_from_algo_history(
+    tmp_path: object, algo_status: str, expected_completed: bool
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v2/positionRisk":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "LONG",
+                        "positionAmt": "0.2",
+                        "entryPrice": "100",
+                        "markPrice": "102",
+                        "unRealizedProfit": "0.4",
+                        "isolatedWallet": "10",
+                    }
+                ],
+            )
+        if request.url.path == "/fapi/v1/openAlgoOrders":
+            return httpx.Response(
+                200,
+                json={
+                    "orders": [
+                        {
+                            "algoId": 7,
+                            "clientAlgoId": "frc_abc_sl",
+                            "symbol": "BTCUSDT",
+                            "side": "SELL",
+                            "positionSide": "LONG",
+                            "orderType": "STOP_MARKET",
+                            "algoStatus": "NEW",
+                            "triggerPrice": "99",
+                            "closePosition": True,
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/fapi/v1/allAlgoOrders":
+            return httpx.Response(
+                200,
+                json={
+                    "orders": [
+                        {
+                            "algoId": 8,
+                            "clientAlgoId": "frc_old_t1",
+                            "symbol": "BTCUSDT",
+                            "positionSide": "LONG",
+                            "orderType": "TAKE_PROFIT_MARKET",
+                            "algoStatus": algo_status,
+                            "updateTime": 1000,
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    try:
+        current = (await client.get_positions())[0]
+    finally:
+        await client.close()
+
+    assert current.tp1_completed is expected_completed
+    assert current.tp1_status_known is True
+    assert current.tp1_price is None
+    assert current.tp2_price is None
+
+
+@pytest.mark.asyncio
+async def test_get_positions_marks_surviving_tp2_as_completed_tp1(tmp_path: object) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v2/positionRisk":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "BTCUSDT",
+                        "positionSide": "LONG",
+                        "positionAmt": "0.2",
+                        "entryPrice": "100",
+                        "markPrice": "103",
+                        "unRealizedProfit": "0.6",
+                        "isolatedWallet": "10",
+                    }
+                ],
+            )
+        if request.url.path == "/fapi/v1/openAlgoOrders":
+            return httpx.Response(
+                200,
+                json={
+                    "orders": [
+                        {
+                            "algoId": 7,
+                            "clientAlgoId": "frc_abc_sl",
+                            "symbol": "BTCUSDT",
+                            "side": "SELL",
+                            "positionSide": "LONG",
+                            "orderType": "STOP_MARKET",
+                            "algoStatus": "NEW",
+                            "triggerPrice": "100.2",
+                            "closePosition": True,
+                        },
+                        {
+                            "algoId": 9,
+                            "clientAlgoId": "frc_abc_t2",
+                            "symbol": "BTCUSDT",
+                            "side": "SELL",
+                            "positionSide": "LONG",
+                            "orderType": "TAKE_PROFIT_MARKET",
+                            "algoStatus": "NEW",
+                            "triggerPrice": "106",
+                            "quantity": "0.08",
+                        },
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    try:
+        current = (await client.get_positions())[0]
+    finally:
+        await client.close()
+
+    assert current.tp1_price is None
+    assert current.tp2_price == Decimal("106")
+    assert current.tp1_completed is True
+    assert current.tp1_status_known is True
 
 
 @pytest.mark.asyncio

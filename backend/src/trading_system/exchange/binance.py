@@ -345,9 +345,42 @@ class BinanceUSDMarketClient(ExchangeGateway):
             if staged_take_profits:
                 tp1 = staged_take_profits.get("t1")
                 tp2 = staged_take_profits.get("t2")
+                tp1_completed = "t1" not in staged_take_profits and "t2" in staged_take_profits
+                tp1_status_known = True
             else:
                 tp1 = take_profits[0] if take_profits else None
                 tp2 = take_profits[1] if len(take_profits) > 1 else None
+                tp1_completed = False
+                tp1_status_known = len(take_profits) >= 2
+                if not take_profits:
+                    try:
+                        history = self._algo_orders(
+                            await self._request(
+                                "GET",
+                                "/fapi/v1/allAlgoOrders",
+                                {"symbol": row["symbol"], "limit": 100},
+                                signed=True,
+                            )
+                        )
+                    except ExchangeError as error:
+                        # A history lookup is only needed to disambiguate the
+                        # brief gap after TP cancellation/fill.  Keep the hard
+                        # stop snapshot usable and let repository hydration
+                        # retain the previously verified stage.
+                        logger.warning(
+                            "unable to resolve TP1 history symbol=%s side=%s error=%s",
+                            row["symbol"],
+                            side.value,
+                            error,
+                        )
+                    else:
+                        tp1_completed, tp1_status_known = (
+                            self._tp1_completion_from_history(
+                                history,
+                                symbol=str(row["symbol"]),
+                                position_side=side.value,
+                            )
+                        )
             risk_per_unit = max(Decimal("0.00000001"), abs(entry - stop))
             direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
             positions.append(
@@ -362,6 +395,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
                     stop_price=stop,
                     tp1_price=tp1,
                     tp2_price=tp2,
+                    tp1_completed=tp1_completed,
+                    tp1_status_known=tp1_status_known,
                     original_stop_price=stop,
                     initial_risk_usdt=quantity * risk_per_unit,
                     unrealized_pnl=Decimal(row["unRealizedProfit"]),
@@ -1583,6 +1618,66 @@ class BinanceUSDMarketClient(ExchangeGateway):
     def _algo_active(cls, order: dict[str, Any]) -> bool:
         status = str(order.get("algoStatus") or order.get("status") or "NEW").upper()
         return status not in {"CANCELED", "CANCELLED", "EXPIRED", "FINISHED", "REJECTED"}
+
+    @classmethod
+    def _tp1_completion_from_history(
+        cls,
+        orders: list[dict[str, Any]],
+        *,
+        symbol: str,
+        position_side: str,
+    ) -> tuple[bool, bool]:
+        """Return TP1 completion only from the latest managed TP1 order.
+
+        FINISHED/FILLED means the exchange executed TP1.  Cancellation,
+        rejection or expiry means it did not complete and both tranches must
+        be rebuilt.  Unknown/missing history remains explicitly unresolved so
+        repository hydration can preserve the last verified state.
+        """
+
+        candidates = [
+            order
+            for order in orders
+            if str(order.get("symbol", "")) == symbol
+            and str(order.get("positionSide", "")) == position_side
+            and cls._algo_client_id(order).startswith("frc_")
+            and cls._algo_client_id(order).endswith("_t1")
+        ]
+        if not candidates:
+            return False, False
+
+        def order_time(order: dict[str, Any]) -> int:
+            for field in ("updateTime", "triggerTime", "createTime", "time", "algoId"):
+                try:
+                    return int(order.get(field) or 0)
+                except (TypeError, ValueError):
+                    continue
+            return 0
+
+        latest = max(candidates, key=order_time)
+        status = str(
+            latest.get("algoStatus")
+            or latest.get("status")
+            or latest.get("triggerStatus")
+            or ""
+        ).upper()
+        if status in {"FINISHED", "FILLED"}:
+            return True, True
+        if status in {
+            "NEW",
+            "TRIGGER_PENDING",
+            "TRIGGERING",
+            "TRIGGERED",
+            "WORKING",
+            "EXECUTING",
+            "PARTIALLY_FILLED",
+            "CANCELED",
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+        }:
+            return False, True
+        return False, False
 
     @classmethod
     def _algo_matches(

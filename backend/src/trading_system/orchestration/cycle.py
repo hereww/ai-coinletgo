@@ -1095,8 +1095,8 @@ class TradingCycle:
             if position.side == PositionSide.LONG
             else entry - risk * Decimal("2")
         )
-        tp1 = position.tp1_price
-        if tp1 is None and position.tp2_price is None:
+        tp1 = None if position.tp1_completed else position.tp1_price
+        if tp1 is None and not position.tp1_completed:
             tp1 = entry + risk if position.side == PositionSide.LONG else entry - risk
         intent_id = uuid5(
             NAMESPACE_URL,

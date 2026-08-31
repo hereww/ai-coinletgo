@@ -187,6 +187,13 @@ class PositionState(BaseModel):
     # treating the allocation as a no-op.
     tp1_price: PositiveDecimal | None = None
     tp2_price: PositiveDecimal | None = None
+    # TP1 completion is an execution fact, not something that can be inferred
+    # from the remaining quantity: an AI REDUCE can leave exactly the same
+    # position size as the first take-profit tranche.  ``tp1_status_known`` is
+    # exchange-read metadata used while hydrating a temporarily incomplete
+    # open-order snapshot and is deliberately not persisted or exposed.
+    tp1_completed: bool = False
+    tp1_status_known: bool = Field(default=False, exclude=True)
     original_stop_price: PositiveDecimal | None = None
     initial_risk_usdt: PositiveDecimal
     unrealized_pnl: Decimal = Decimal("0")

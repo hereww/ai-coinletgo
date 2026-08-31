@@ -998,6 +998,17 @@ class Repository:
                     if risk_per_unit > 0
                     else Decimal("0")
                 )
+                if position.tp1_status_known:
+                    tp1_completed = position.tp1_completed
+                elif position.tp1_price is not None:
+                    tp1_completed = False
+                elif position.tp2_price is not None:
+                    tp1_completed = True
+                else:
+                    # Binance can briefly omit both Algo TP orders after a
+                    # fill/cancellation.  Preserve the last exchange-verified
+                    # stage only while this snapshot is explicitly unknown.
+                    tp1_completed = previous.tp1_completed
                 position = position.model_copy(
                     update={
                         "initial_quantity": initial_quantity,
@@ -1005,6 +1016,7 @@ class Repository:
                         "initial_risk_usdt": initial_quantity * risk_per_unit,
                         "current_r": current_r,
                         "opened_at": previous.opened_at,
+                        "tp1_completed": tp1_completed,
                     }
                 )
             hydrated.append(position)
