@@ -288,7 +288,10 @@ class PositionProtectionMonitor:
             positions = await self.repository.hydrate_positions(
                 await self.exchange.get_positions()
             )
-            await self._resume_testnet_after_verified_repair(positions)
+        # Binance can expose a just-created Algo order one polling pass later.
+        # Re-check the exact monitor-imposed pause on every pass so a verified
+        # repair cannot leave testnet entries stuck indefinitely.
+        await self._resume_testnet_after_verified_repair(positions)
 
         snapshots = await self._latest_snapshots()
         changed = False

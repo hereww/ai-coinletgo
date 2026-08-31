@@ -376,3 +376,40 @@ async def test_verified_take_profit_repair_resumes_only_monitor_paused_testnet()
     assert repository.mode == SystemMode.TESTNET
     assert repository.halt_reason is None
     assert notifier.messages[-1][0] == "止盈保护已恢复"
+
+
+@pytest.mark.asyncio
+async def test_next_monitor_pass_resumes_after_exchange_exposes_repaired_tp2() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        protected=True,
+        tp1_price=None,
+        tp2_price=Decimal("104"),
+        current_r=Decimal("0"),
+    )
+
+    class RepositoryAfterRepair(StubRepository):
+        def __init__(self):
+            super().__init__({(current.symbol, current.side.value)})
+            self.mode = SystemMode.PAUSED
+            self.halt_reason = "take-profit protection repair failed"
+
+        async def latest_market(self, limit):
+            del limit
+            return []
+
+    repository = RepositoryAfterRepair()
+    notifier = StubNotifier()
+    monitor = PositionProtectionMonitor(
+        Settings(),
+        repository,  # type: ignore[arg-type]
+        StubExchange([current]),  # type: ignore[arg-type]
+        notifier,  # type: ignore[arg-type]
+    )
+
+    await monitor.run_once()
+
+    assert repository.mode == SystemMode.TESTNET
+    assert repository.halt_reason is None
+    assert notifier.messages[-1][0] == "止盈保护已恢复"
