@@ -94,6 +94,46 @@ def test_compiler_allocates_new_candidate_under_hard_risk_cap() -> None:
     assert plan.approved_risk_usdt <= plan.risk_cap_usdt
 
 
+@pytest.mark.parametrize(
+    ("side", "stop_price", "target_price", "risk_entry"),
+    [
+        (PortfolioTargetSide.LONG, Decimal("98.2"), Decimal("106"), Decimal("100.2")),
+        (PortfolioTargetSide.SHORT, Decimal("101.8"), Decimal("94"), Decimal("99.8")),
+    ],
+)
+def test_compiler_sizes_new_position_from_worst_permitted_fill_edge(
+    side: PortfolioTargetSide,
+    stop_price: Decimal,
+    target_price: Decimal,
+    risk_entry: Decimal,
+) -> None:
+    requested = allocation(
+        target_side=side,
+        allocation_fraction=Decimal("1"),
+        entry_min=Decimal("99.8"),
+        entry_max=Decimal("100.2"),
+        stop_price=stop_price,
+        target_price=target_price,
+    )
+
+    plan = PortfolioCompiler().compile(
+        decision(requested),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    action = plan.actions[0]
+    worst_fill_risk = action.target_quantity * abs(risk_entry - stop_price)
+    assert action.action == PortfolioPlanActionType.OPEN
+    assert action.target_quantity == Decimal("3.7")
+    assert action.target_risk_usdt == worst_fill_risk
+    assert worst_fill_risk <= plan.risk_cap_usdt
+
+
 def test_compiler_rejects_target_when_available_balance_is_insufficient() -> None:
     account = context().account.model_copy(update={"available_balance": Decimal("0")})
     plan = PortfolioCompiler().compile(

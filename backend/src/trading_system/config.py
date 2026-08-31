@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = 120.0
     model_daily_request_limit: int = 110
     model_prompt_version: str = "signal-v1"
-    portfolio_prompt_version: str = "portfolio-v1.2"
+    portfolio_prompt_version: str = "portfolio-v1.3"
     strategy_profile: Literal[
         "conservative", "balanced", "trend_following", "scalping"
     ] = "trend_following"

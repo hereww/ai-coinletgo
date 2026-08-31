@@ -124,6 +124,15 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
     assert "机会下限" in system_text
     assert "ADX_1h >= 20" in system_text
     assert "不能仅因15分钟触发暂为0" in system_text
+    assert "entry_range_min_width_abs" in system_text
+    assert "不得只把当时的 best_bid、best_ask 原样复制成入场区间" in system_text
+
+    context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
+    sent_candidate = context["candidates"][0]
+    assert sent_candidate["entry_range_reference_price"] == "100.0"
+    assert Decimal(sent_candidate["entry_range_min_width_abs"]) == Decimal("0.20")
+    assert Decimal(sent_candidate["stop_distance_min_abs"]) == Decimal("0.800")
+    assert Decimal(sent_candidate["stop_distance_max_abs"]) == Decimal("2.500")
 
 
 @pytest.mark.asyncio
@@ -334,6 +343,134 @@ async def test_portfolio_context_uses_entry_as_tp2_boundary_after_tp1_completion
 
 
 @pytest.mark.asyncio
+async def test_portfolio_market_contract_repairs_one_spread_entry_range(
+    tmp_path: object,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+    invalid = {
+        "market_regime": "TRENDING",
+        "portfolio_risk_budget_fraction": 0.35,
+        "allocations": [
+            {
+                "symbol": "DOGEUSDT",
+                "target_side": "SHORT",
+                "allocation_fraction": 1,
+                "priority": 1,
+                "confidence": 0.8,
+                "entry_min": "0.082880",
+                "entry_max": "0.082900",
+                "stop_price": "0.083590",
+                "target_price": "0.081000",
+                "thesis": "高周期空头趋势延续",
+                "reason_codes": ["TREND_ALIGNED"],
+                "risk_flags": [],
+            }
+        ],
+        "summary": "尝试建立空头",
+        "expires_at": expires_at.isoformat(),
+    }
+    repaired = {
+        **invalid,
+        "allocations": [
+            {
+                **invalid["allocations"][0],
+                "entry_min": "0.082840",
+                "entry_max": "0.082940",
+                "thesis": "使用可执行的有界入场区间",
+            }
+        ],
+    }
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = invalid if len(captured) == 1 else repaired
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    candidate = snapshot(
+        symbol="DOGEUSDT",
+        mark_price=Decimal("0.08289628"),
+        index_price=Decimal("0.08291833"),
+        best_bid=Decimal("0.082880"),
+        best_ask=Decimal("0.082900"),
+        atr_15m=Decimal("0.000355"),
+        trend_1h=-1,
+        trend_4h=-1,
+    )
+    client = ResponsesModelClient(
+        model_settings(tmp_path), transport=httpx.MockTransport(handler)
+    )
+    try:
+        decision = await client.analyze_portfolio([candidate], [], expires_at)
+    finally:
+        await client.close()
+
+    assert len(captured) == 2
+    repair_text = captured[1]["input"][-1]["content"][0]["text"]  # type: ignore[index]
+    assert "DOGEUSDT:entry_range_too_narrow" in repair_text
+    assert decision.allocations[0].entry_min == Decimal("0.082840")
+    assert decision.allocations[0].entry_max == Decimal("0.082940")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_market_contract_repairs_stop_beyond_atr_limit(
+    tmp_path: object,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+    invalid = {
+        "market_regime": "TRENDING",
+        "portfolio_risk_budget_fraction": 0.4,
+        "allocations": [
+            {
+                "symbol": "BTCUSDT",
+                "target_side": "LONG",
+                "allocation_fraction": 1,
+                "priority": 1,
+                "confidence": 0.85,
+                "entry_min": "99.8",
+                "entry_max": "100.2",
+                "stop_price": "97.0",
+                "target_price": "107.0",
+                "thesis": "多头趋势延续",
+                "reason_codes": ["TREND_ALIGNED"],
+                "risk_flags": [],
+            }
+        ],
+        "summary": "尝试建立多头",
+        "expires_at": expires_at.isoformat(),
+    }
+    repaired = {
+        **invalid,
+        "allocations": [
+            {
+                **invalid["allocations"][0],
+                "stop_price": "98.2",
+                "thesis": "止损距离修正到 ATR 上限内",
+            }
+        ],
+    }
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = invalid if len(captured) == 1 else repaired
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    client = ResponsesModelClient(
+        model_settings(tmp_path), transport=httpx.MockTransport(handler)
+    )
+    try:
+        decision = await client.analyze_portfolio([snapshot()], [], expires_at)
+    finally:
+        await client.close()
+
+    assert len(captured) == 2
+    repair_text = captured[1]["input"][-1]["content"][0]["text"]  # type: ignore[index]
+    assert "BTCUSDT:stop_too_far" in repair_text
+    assert decision.allocations[0].stop_price == Decimal("98.2")
+
+
+@pytest.mark.asyncio
 async def test_relay_output_message_text_is_parsed_without_repair(tmp_path: object) -> None:
     calls = 0
 
@@ -419,7 +556,7 @@ async def test_portfolio_response_is_structured_and_identity_is_stable(tmp_path:
     assert first.decision_id == second.decision_id
     assert first.allocations[0].allocation_id == second.allocations[0].allocation_id
     assert first.model_name == "gpt-5.6"
-    assert first.prompt_version == "portfolio-v1.2"
+    assert first.prompt_version == "portfolio-v1.3"
     assert captured[0]["text"]["format"]["name"] == "portfolio_decision"  # type: ignore[index]
     payload_text = json.dumps(captured[0])
     assert "equity" not in payload_text
@@ -476,9 +613,19 @@ async def test_portfolio_short_geometry_is_repaired_instead_of_reaching_compiler
         model_settings(tmp_path),
         transport=httpx.MockTransport(handler),
     )
+    candidate = snapshot(
+        symbol="TUTUSDT",
+        mark_price=Decimal("0.04000"),
+        index_price=Decimal("0.04000"),
+        best_bid=Decimal("0.03999"),
+        best_ask=Decimal("0.04001"),
+        atr_15m=Decimal("0.00060"),
+        trend_1h=-1,
+        trend_4h=-1,
+    )
     try:
         decision = await client.analyze_portfolio(
-            [snapshot(symbol="TUTUSDT")],
+            [candidate],
             [],
             expires_at,
         )

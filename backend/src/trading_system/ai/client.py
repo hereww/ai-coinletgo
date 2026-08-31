@@ -265,6 +265,12 @@ portfolio_risk_budget_fraction 和 allocation_fraction 都必须在 0 到 1 之�
 任何 target_side 为 LONG 或 SHORT 的分配都必须填写绝对价格的 entry_min、entry_max、
 stop_price、target_price，四个字段均不得为 null；价格关系必须满足多头 stop < entry < target，
 空头 target < entry < stop，且止损距离落在输入的 ATR 范围内、净盈亏比不低于策略下限。
+对新开仓候选，entry_min <= entry_range_reference_price <= entry_max，且
+entry_max - entry_min 必须不小于该候选的 entry_range_min_width_abs。这个最小宽度用于吸收
+模型推理和交易所请求期间的正常报价变化；不得只把当时的 best_bid、best_ask 原样复制成入场区间。
+本地风控按区间最不利成交边缘计算风险：LONG 使用 entry_max，SHORT 使用 entry_min；从该边缘到
+stop_price 的绝对距离必须位于 stop_distance_min_abs 与 stop_distance_max_abs 之间。
+入场区间仍是有界许可，不是追价许可，超出区间时系统会等待下一周期重新判断。
 例如空头入场区间 100-101 时，stop_price 必须大于 101（如 103），target_price 必须小于 100（如 94）；
 多头则相反：stop_price 小于 100，target_price 大于 101。不要交换 stop_price 与 target_price。
 如果无法给出完整价格结构，请把该合约设为 FLAT 或省略该新候选，而不是返回半成品开仓意图。
@@ -466,8 +472,13 @@ class ResponsesModelClient:
         )
         try:
             response = await self._post(payload)
+            decision = PortfolioDecision.model_validate(
+                self._parse_structured_json(response)
+            )
             return self._normalize_portfolio(
-                PortfolioDecision.model_validate(self._parse_structured_json(response)),
+                self._validate_portfolio_market_contract(
+                    decision, candidates, positions
+                ),
                 cycle_expires_at,
             )
         except ModelRelayRequestError:
@@ -506,8 +517,13 @@ class ResponsesModelClient:
                 response = await self._post(
                     repair, timeout_seconds=self._repair_timeout_seconds()
                 )
+                decision = PortfolioDecision.model_validate(
+                    self._parse_structured_json(response)
+                )
                 return self._normalize_portfolio(
-                    PortfolioDecision.model_validate(self._parse_structured_json(response)),
+                    self._validate_portfolio_market_contract(
+                        decision, candidates, positions
+                    ),
                     cycle_expires_at,
                 )
             except httpx.ReadTimeout:
@@ -843,10 +859,22 @@ class ResponsesModelClient:
         *,
         strict: bool = True,
     ) -> dict[str, Any]:
-        safe_candidates = [
-            item.model_dump(mode="json", exclude={"recent_returns_1h"})
-            for item in candidates
-        ]
+        min_stop_atr = Decimal(str(self.settings.min_stop_atr))
+        max_stop_atr = Decimal(str(self.settings.max_stop_atr))
+        safe_candidates = []
+        for item in candidates:
+            candidate = item.model_dump(mode="json", exclude={"recent_returns_1h"})
+            candidate.update(
+                {
+                    "entry_range_reference_price": str(item.mid_price),
+                    "entry_range_min_width_abs": str(
+                        self._entry_range_min_width(item)
+                    ),
+                    "stop_distance_min_abs": str(item.atr_15m * min_stop_atr),
+                    "stop_distance_max_abs": str(item.atr_15m * max_stop_atr),
+                }
+            )
+            safe_candidates.append(candidate)
         safe_positions = [
             {
                 **item.model_dump(mode="json"),
@@ -874,6 +902,8 @@ class ResponsesModelClient:
                 "min_confidence": self.settings.min_confidence,
                 "min_net_reward_risk": self.settings.min_net_reward_risk,
                 "stop_atr_range": [self.settings.min_stop_atr, self.settings.max_stop_atr],
+                "entry_range_min_atr_fraction": 0.2,
+                "entry_range_must_include_reference_price": True,
             },
             "cycle_expires_at": cycle_expires_at.isoformat(),
             "portfolio_context": portfolio_context,
@@ -924,6 +954,63 @@ class ResponsesModelClient:
                 + json.dumps(PortfolioDecision.model_json_schema(mode="serialization"))
             )
         return payload
+
+    @staticmethod
+    def _entry_range_min_width(snapshot: MarketSnapshot) -> Decimal:
+        """Return a small but executable range for one model-to-exchange hop."""
+
+        spread = max(Decimal("0"), snapshot.best_ask - snapshot.best_bid)
+        return max(spread, snapshot.atr_15m * Decimal("0.20"))
+
+    def _validate_portfolio_market_contract(
+        self,
+        decision: PortfolioDecision,
+        candidates: list[MarketSnapshot],
+        positions: list[PositionState],
+    ) -> PortfolioDecision:
+        """Reject valid JSON that is predictably stale or outside ATR limits."""
+
+        candidate_by_symbol = {item.symbol: item for item in candidates}
+        existing_symbols = {item.symbol for item in positions}
+        min_stop_atr = Decimal(str(self.settings.min_stop_atr))
+        max_stop_atr = Decimal(str(self.settings.max_stop_atr))
+        issues: list[str] = []
+        for allocation in decision.allocations:
+            if allocation.target_side.value == "FLAT":
+                continue
+            if allocation.symbol in existing_symbols:
+                continue
+            snapshot = candidate_by_symbol.get(allocation.symbol)
+            if snapshot is None:
+                continue
+            assert allocation.entry_min is not None
+            assert allocation.entry_max is not None
+            assert allocation.stop_price is not None
+            if not allocation.entry_min <= snapshot.mid_price <= allocation.entry_max:
+                issues.append(f"{allocation.symbol}:entry_range_misses_reference")
+            minimum_width = self._entry_range_min_width(snapshot)
+            if allocation.entry_max - allocation.entry_min < minimum_width:
+                issues.append(
+                    f"{allocation.symbol}:entry_range_too_narrow"
+                    f"(min={minimum_width})"
+                )
+            risk_entry = (
+                allocation.entry_max
+                if allocation.target_side.value == "LONG"
+                else allocation.entry_min
+            )
+            stop_atr = abs(risk_entry - allocation.stop_price) / snapshot.atr_15m
+            if stop_atr < min_stop_atr:
+                issues.append(
+                    f"{allocation.symbol}:stop_too_close(min_atr={min_stop_atr})"
+                )
+            elif stop_atr > max_stop_atr:
+                issues.append(
+                    f"{allocation.symbol}:stop_too_far(max_atr={max_stop_atr})"
+                )
+        if issues:
+            raise ValueError("market_contract:" + ";".join(issues[:4]))
+        return decision
 
     @staticmethod
     def _parse(body: dict[str, Any]) -> AIAnalysisResponse:

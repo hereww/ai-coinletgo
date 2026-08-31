@@ -402,7 +402,7 @@ class PortfolioCompiler:
             return self._rejected(allocation, "entry_direction_not_allowed")
         if not self._valid_geometry(allocation, snapshot):
             return self._rejected(allocation, "invalid_price_geometry")
-        entry = self._allocation_entry(allocation, snapshot)
+        entry = self._risk_entry(allocation, snapshot)
         assert allocation.stop_price is not None
         assert allocation.target_price is not None
         distance = abs(entry - allocation.stop_price)
@@ -571,6 +571,18 @@ class PortfolioCompiler:
         if allocation.entry_min <= snapshot.mid_price <= allocation.entry_max:
             return snapshot.mid_price
         return midpoint
+
+    @staticmethod
+    def _risk_entry(allocation: PortfolioAllocation, snapshot: MarketSnapshot) -> Decimal:
+        """Use the permitted fill edge with the worst reward/risk geometry."""
+
+        if allocation.entry_min is None or allocation.entry_max is None:
+            return snapshot.mid_price
+        if allocation.target_side == PortfolioTargetSide.LONG:
+            return allocation.entry_max
+        if allocation.target_side == PortfolioTargetSide.SHORT:
+            return allocation.entry_min
+        return snapshot.mid_price
 
     def _valid_geometry(
         self,
