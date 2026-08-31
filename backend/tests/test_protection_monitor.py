@@ -38,6 +38,7 @@ class StubRepository:
     def __init__(self, known: set[tuple[str, str]]) -> None:
         self.known = known
         self.mode = SystemMode.TESTNET
+        self.halt_reason = None
         self.synced = None
 
     async def hydrate_positions(self, positions):
@@ -51,9 +52,13 @@ class StubRepository:
         return self.mode
 
     async def set_mode(self, mode, *, halt_reason=None):
-        del halt_reason
         self.mode = mode
+        self.halt_reason = halt_reason
         return mode
+
+    async def get_mode_state(self, default, environment):
+        del default, environment
+        return {"mode": self.mode.value, "halt_reason": self.halt_reason}
 
     async def sync_positions(self, positions):
         self.synced = positions
@@ -290,3 +295,84 @@ async def test_missing_take_profits_are_rebuilt_and_synced() -> None:
     assert average_price == Decimal("100")
     assert repository.synced[0].tp1_price == Decimal("102")
     assert repository.synced[0].tp2_price == Decimal("104")
+
+
+def test_take_profit_repair_preserves_tp2_only_stage_after_first_tranche() -> None:
+    current = position(
+        position_id="binance-CYSUSDT-LONG",
+        symbol="CYSUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("26"),
+        initial_quantity=Decimal("44"),
+        entry_price=Decimal("0.8443999999999999"),
+        mark_price=Decimal("0.8394"),
+        stop_price=Decimal("0.821"),
+        tp1_price=None,
+        tp2_price=None,
+    )
+
+    intent = PositionProtectionMonitor._repair_intent(current)
+
+    assert intent.tp1_price is None
+    assert intent.tp2_price == Decimal("0.8911999999999997")
+
+
+@pytest.mark.asyncio
+async def test_verified_take_profit_repair_resumes_only_monitor_paused_testnet() -> None:
+    current = position(
+        position_id="binance-BTCUSDT-LONG",
+        symbol="BTCUSDT",
+        side=PositionSide.LONG,
+        quantity=Decimal("10"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        tp1_price=None,
+        tp2_price=None,
+    )
+    repaired = current.model_copy(
+        update={"tp1_price": Decimal("102"), "tp2_price": Decimal("104")}
+    )
+
+    class RepositoryWithRecovery(StubRepository):
+        def __init__(self):
+            super().__init__({(current.symbol, current.side.value)})
+            self.mode = SystemMode.PAUSED
+            self.halt_reason = "take-profit protection repair failed"
+
+        async def latest_market(self, limit):
+            del limit
+            return []
+
+        async def save_orders(self, orders):
+            del orders
+
+    class RepairExchange(StubExchange):
+        async def get_filters(self, symbol):
+            del symbol
+            return ExchangeFilters(
+                tick_size=Decimal("0.1"),
+                step_size=Decimal("0.1"),
+                min_quantity=Decimal("0.1"),
+                min_notional=Decimal("5"),
+            )
+
+        async def upsert_protection(self, intent, filled_quantity, average_price):
+            del intent, filled_quantity, average_price
+            self.positions = [repaired]
+            return []
+
+    repository = RepositoryWithRecovery()
+    notifier = StubNotifier()
+    monitor = PositionProtectionMonitor(
+        Settings(),
+        repository,  # type: ignore[arg-type]
+        RepairExchange([current]),  # type: ignore[arg-type]
+        notifier,  # type: ignore[arg-type]
+    )
+
+    await monitor.run_once()
+
+    assert repository.mode == SystemMode.TESTNET
+    assert repository.halt_reason is None
+    assert notifier.messages[-1][0] == "止盈保护已恢复"

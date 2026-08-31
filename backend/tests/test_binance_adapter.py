@@ -615,7 +615,7 @@ async def test_protection_first_target_follows_actual_fill_price(tmp_path: objec
         entry_max=Decimal("100.5"),
         stop_price=Decimal("99"),
         tp1_price=Decimal("101"),
-        tp2_price=Decimal("105"),
+        tp2_price=Decimal("105.0000000000000003"),
         leverage=3,
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
@@ -625,6 +625,7 @@ async def test_protection_first_target_follows_actual_fill_price(tmp_path: objec
         await client.close()
 
     assert submitted[1]["triggerPrice"] == "102"
+    assert submitted[2]["triggerPrice"] == "105"
 
 
 @pytest.mark.asyncio
@@ -731,6 +732,7 @@ async def test_protection_tp2_only_stage_does_not_recreate_tp1(tmp_path: object)
     assert [item.order_type for item in orders] == ["STOP_MARKET", "TAKE_PROFIT_MARKET"]
     assert [item["type"] for item in submitted] == ["STOP_MARKET", "TAKE_PROFIT_MARKET"]
     assert submitted[1]["clientAlgoId"].endswith("_t2")
+    assert submitted[1]["triggerPrice"] == "105"
 
 
 @pytest.mark.asyncio

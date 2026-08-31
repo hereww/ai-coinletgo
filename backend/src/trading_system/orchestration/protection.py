@@ -288,6 +288,7 @@ class PositionProtectionMonitor:
             positions = await self.repository.hydrate_positions(
                 await self.exchange.get_positions()
             )
+            await self._resume_testnet_after_verified_repair(positions)
 
         snapshots = await self._latest_snapshots()
         changed = False
@@ -393,17 +394,28 @@ class PositionProtectionMonitor:
         risk = abs(position.entry_price - position.stop_price)
         if risk <= 0:
             raise ExchangeError("cannot repair take-profit protection without stop distance")
+        tp1_completed = PositionProtectionMonitor._tp1_likely_completed(position)
         if position.side == PositionSide.LONG:
-            tp1 = position.tp1_price or position.entry_price + risk
-            tp2 = position.tp2_price or max(
-                position.entry_price + risk * Decimal("2"), tp1 + risk
+            tp1 = (
+                None
+                if tp1_completed
+                else position.tp1_price or position.entry_price + risk
+            )
+            default_tp2 = position.entry_price + risk * Decimal("2")
+            tp2 = position.tp2_price or (
+                max(default_tp2, tp1 + risk) if tp1 is not None else default_tp2
             )
         else:
-            tp1 = position.tp1_price or position.entry_price - risk
-            tp2 = position.tp2_price or min(
-                position.entry_price - risk * Decimal("2"), tp1 - risk
+            tp1 = (
+                None
+                if tp1_completed
+                else position.tp1_price or position.entry_price - risk
             )
-        if min(tp1, tp2) <= 0:
+            default_tp2 = position.entry_price - risk * Decimal("2")
+            tp2 = position.tp2_price or (
+                min(default_tp2, tp1 - risk) if tp1 is not None else default_tp2
+            )
+        if tp2 <= 0 or (tp1 is not None and tp1 <= 0):
             raise ExchangeError("cannot repair take-profit protection with invalid target")
         intent_id = uuid5(
             NAMESPACE_URL,
@@ -423,6 +435,47 @@ class PositionProtectionMonitor:
             tp2_price=tp2,
             leverage=1,
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+    @staticmethod
+    def _tp1_likely_completed(position: PositionState) -> bool:
+        """Infer the TP2-only stage from the persisted original quantity.
+
+        Binance can briefly omit the surviving TP2 after TP1 fills.  A normal
+        first tranche closes 40%, leaving about 60%; treating that state as a
+        fresh position would recreate an already-completed TP1.
+        """
+
+        return bool(
+            position.tp1_price is None
+            and position.initial_quantity is not None
+            and position.quantity
+            <= position.initial_quantity * Decimal("0.65")
+        )
+
+    async def _resume_testnet_after_verified_repair(
+        self, positions: list[PositionState]
+    ) -> None:
+        if self.settings.binance_environment != "testnet":
+            return
+        if not positions or any(
+            not position.protected or position.tp2_price is None
+            for position in positions
+        ):
+            return
+        state = await self.repository.get_mode_state(
+            SystemMode.TESTNET, self.settings.binance_environment
+        )
+        if (
+            state.get("mode") != SystemMode.PAUSED.value
+            or state.get("halt_reason") != "take-profit protection repair failed"
+        ):
+            return
+        await self.repository.set_mode(SystemMode.TESTNET, halt_reason=None)
+        logger.info("testnet entries resumed after verified take-profit repair")
+        await self.notifier.send(
+            "止盈保护已恢复",
+            "交易所已确认所有仓位具备硬止损和最终止盈，测试网自动交易已恢复。",
         )
 
     async def _cycle_is_active(self) -> bool:

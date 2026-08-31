@@ -771,20 +771,34 @@ class BinanceUSDMarketClient(ExchangeGateway):
     async def upsert_protection(
         self, intent: ExecutionIntent, filled_quantity: Decimal, average_price: Decimal
     ) -> list[OrderState]:
-        tp1_price = self._tp1_for_fill(intent, average_price)
-        self._validate_take_profit_geometry(intent, tp1_price)
+        raw_tp1_price = self._tp1_for_fill(intent, average_price)
+        self._validate_take_profit_geometry(intent, raw_tp1_price, intent.tp2_price)
         filters = await self.get_filters(intent.symbol)
+        stop_rounding = ROUND_UP if intent.side == PositionSide.LONG else ROUND_DOWN
+        target_rounding = ROUND_DOWN if intent.side == PositionSide.LONG else ROUND_UP
+        stop_price = self._round_price(
+            intent.stop_price, filters.tick_size, stop_rounding
+        )
+        tp1_price = (
+            self._round_price(raw_tp1_price, filters.tick_size, target_rounding)
+            if raw_tp1_price is not None
+            else None
+        )
+        tp2_price = self._round_price(
+            intent.tp2_price, filters.tick_size, target_rounding
+        )
+        self._validate_take_profit_geometry(intent, tp1_price, tp2_price)
         q1 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         q2 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         close_side = "SELL" if intent.side == PositionSide.LONG else "BUY"
         stop_suffix = hashlib.sha256(
-            f"{intent.intent_id}:{self._fmt(intent.stop_price)}".encode()
+            f"{intent.intent_id}:{self._fmt(stop_price)}".encode()
         ).hexdigest()[:12]
         tranche_suffix = hashlib.sha256(
             f"{intent.intent_id}:{self._fmt(filled_quantity)}".encode()
         ).hexdigest()[:12]
         specs: list[tuple[str, str, Decimal, bool, Decimal]] = [
-            (f"frc_{stop_suffix}_sl", "STOP_MARKET", intent.stop_price, True, Decimal("0")),
+            (f"frc_{stop_suffix}_sl", "STOP_MARKET", stop_price, True, Decimal("0")),
         ]
         if tp1_price is not None and q1 >= filters.min_quantity:
             specs.append(
@@ -801,7 +815,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 (
                     f"frc_{tranche_suffix}_t2",
                     "TAKE_PROFIT_MARKET",
-                    intent.tp2_price,
+                    tp2_price,
                     False,
                     q2,
                 )
@@ -1033,17 +1047,19 @@ class BinanceUSDMarketClient(ExchangeGateway):
 
     @staticmethod
     def _validate_take_profit_geometry(
-        intent: ExecutionIntent, tp1_price: Decimal | None
+        intent: ExecutionIntent,
+        tp1_price: Decimal | None,
+        tp2_price: Decimal,
     ) -> None:
         """Fail before any cancellation when TP tranche ordering is unsafe."""
 
         if tp1_price is None:
             return
-        if intent.side == PositionSide.LONG and tp1_price >= intent.tp2_price:
+        if intent.side == PositionSide.LONG and tp1_price >= tp2_price:
             raise ExchangeError(
                 "take-profit invariant violated: LONG requires TP1 below TP2"
             )
-        if intent.side == PositionSide.SHORT and intent.tp2_price >= tp1_price:
+        if intent.side == PositionSide.SHORT and tp2_price >= tp1_price:
             raise ExchangeError(
                 "take-profit invariant violated: SHORT requires TP2 below TP1"
             )
@@ -1856,3 +1872,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
     @staticmethod
     def _round_quantity(value: Decimal, step: Decimal) -> Decimal:
         return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    @staticmethod
+    def _round_price(value: Decimal, tick: Decimal, rounding: str) -> Decimal:
+        return (value / tick).to_integral_value(rounding=rounding) * tick
