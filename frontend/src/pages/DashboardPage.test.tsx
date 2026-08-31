@@ -33,6 +33,7 @@ const dashboard = {
   },
   positions: [],
   signals: [],
+  portfolio_decisions: [],
   health: { ready: true, components: [], checked_at: new Date().toISOString() },
   uptime_seconds: 60,
 }
@@ -124,6 +125,52 @@ describe('DashboardPage', () => {
     expect(screen.getByText('103')).toBeInTheDocument()
     expect(screen.getByText(/2\.50R/)).toBeInTheDocument()
     expect(screen.getAllByText('标记价格').length).toBeGreaterThan(1)
+  })
+
+  it('shows the latest portfolio cycle separately from older legacy signals', async () => {
+    apiMock.dashboard.mockResolvedValue({
+      ...dashboard,
+      signals: [{ symbol: 'OLDUSDT', id: 'old-signal', created_at: '2026-08-31T07:00:00Z' }],
+      portfolio_decisions: [{
+        id: 'portfolio-1', status: 'APPROVED', market_regime: 'TRENDING',
+        portfolio_risk_budget_fraction: '0.4', model_name: 'Qwen/Qwen3.8-27B-FP8',
+        prompt_version: 'portfolio-v1.3', created_at: '2026-08-31T08:45:10Z',
+        payload: { summary: '最新组合保持小额试探。', expires_at: '2026-08-31T09:00:00Z', allocations: [{
+          allocation_id: 'allocation-1', symbol: 'BTCUSDT', target_side: 'LONG', allocation_fraction: '0.2', priority: 1, confidence: '0.8', thesis: '趋势一致',
+        }] },
+        allocations: [],
+      }],
+      cycle_status: { state: 'EXECUTED', detail: '组合决策完成', started_at: '2026-08-31T08:45:05Z', finished_at: '2026-08-31T08:46:00Z', snapshots: 1, candidates: 1, signals: 1, approved: 1, executed: 1, failed: false },
+    })
+    renderPage()
+    expect(await screen.findByText('最新组合保持小额试探。')).toBeInTheDocument()
+    expect(screen.getByText('Qwen/Qwen3.8-27B-FP8')).toBeInTheDocument()
+    expect(screen.queryByText('OLDUSDT')).not.toBeInTheDocument()
+  })
+
+  it('shows the current cycle timeout instead of presenting an old signal as latest', async () => {
+    apiMock.dashboard.mockResolvedValue({
+      ...dashboard,
+      signals: [{ symbol: 'OLDUSDT', id: 'old-signal', created_at: '2026-08-31T07:00:00Z' }],
+      portfolio_decisions: [],
+      cycle_status: {
+        state: 'MODEL_TIMEOUT',
+        detail: '模型中转请求超时，本轮未生成组合决策',
+        started_at: '2026-08-31T08:45:05Z',
+        finished_at: '2026-08-31T08:45:50Z',
+        snapshots: 30,
+        candidates: 16,
+        signals: 0,
+        approved: 0,
+        executed: 0,
+        failed: true,
+      },
+    })
+    renderPage()
+
+    expect(await screen.findByText('本轮模型响应超时，未生成组合决策')).toBeInTheDocument()
+    expect(screen.getAllByText('模型中转请求超时，本轮未生成组合决策').length).toBeGreaterThan(0)
+    expect(screen.queryByText('OLDUSDT')).not.toBeInTheDocument()
   })
 
   it('requires the operator password to resume testnet execution', async () => {

@@ -190,6 +190,25 @@
 .cycle-status-executed { border-color: var(--green-border); background: var(--green-soft); }
 .cycle-status-risk_rejected, .cycle-status-model_unavailable, .cycle-status-model_timeout, .cycle-status-model_throttled, .cycle-status-blocked_reconciliation, .cycle-status-exchange_unavailable, .cycle-status-failed { border-color: var(--amber-border); background: var(--amber-soft); }
 .cycle-status-no_candidates { border-color: var(--line); }
+.portfolio-decision-list { display: grid; gap: 10px; }
+.portfolio-cycle-note { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; padding: 11px 12px; border: 1px solid var(--amber-border); border-radius: 6px; background: var(--amber-soft); color: var(--muted); font-size: 10px; line-height: 1.45; }
+.portfolio-cycle-note svg { margin-top: 1px; color: var(--amber); }
+.portfolio-cycle-note div { display: grid; gap: 3px; min-width: 0; }
+.portfolio-cycle-note strong { color: var(--text-section); font-size: 11px; }
+.portfolio-cycle-note span { overflow-wrap: anywhere; }
+.portfolio-cycle-note time { color: var(--faint); font-size: 9px; }
+.portfolio-decision-entry { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.portfolio-decision-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.portfolio-decision-head > div { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
+.portfolio-decision-head svg { color: var(--green); }
+.portfolio-decision-head strong { color: var(--text-section); font-size: 11px; }
+.portfolio-decision-head time { flex: 0 0 auto; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.portfolio-decision-entry p { margin: 0; color: var(--text-subtle); font-size: 10px; line-height: 1.5; }
+.portfolio-decision-meta, .portfolio-decision-targets { display: flex; flex-wrap: wrap; gap: 6px; color: var(--muted); font-size: 9px; }
+.portfolio-decision-meta span, .portfolio-decision-targets span { padding: 3px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.portfolio-decision-targets { color: var(--text-section); }
+.portfolio-decision-link { justify-self: start; color: var(--green-strong); font-size: 10px; text-decoration: none; }
+.portfolio-decision-link:hover { text-decoration: underline; }
 .success-note { border-color: var(--green-border); background: var(--green-soft); color: var(--green-strong); }
 
 .replay-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); min-height: 430px; }

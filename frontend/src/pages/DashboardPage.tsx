@@ -10,6 +10,7 @@ import { HealthList } from '../features/dashboard/HealthList'
 import { ManualEntryDialog } from '../features/dashboard/ManualEntryDialog'
 import { MetricStrip } from '../features/dashboard/MetricStrip'
 import { PositionsTable } from '../features/dashboard/PositionsTable'
+import { PortfolioDecisionsList } from '../features/dashboard/PortfolioDecisionsList'
 import { RiskCapacity } from '../features/dashboard/RiskCapacity'
 import { SignalsList } from '../features/dashboard/SignalsList'
 
@@ -50,6 +51,16 @@ export default function DashboardPage() {
     executed: 0,
     failed: false,
   }
+  // A timeout/interrupted cycle may have no persisted PortfolioDecision. In
+  // that case the legacy signal history must not masquerade as the current
+  // model decision; show the current cycle status instead.
+  const latestPortfolioCreatedAt = data.portfolio_decisions?.[0]?.created_at
+  const hasNewerPortfolioCycle = Boolean(
+    cycleStatus.started_at
+      && (!latestPortfolioCreatedAt
+        || new Date(cycleStatus.started_at).getTime() > new Date(latestPortfolioCreatedAt).getTime()),
+  )
+  const showPortfolioDecisionView = Boolean(data.portfolio_decisions?.length) || hasNewerPortfolioCycle
   const paused = ['PAUSED', 'RISK_HALTED', 'RECONCILIATION_REQUIRED'].includes(data.mode)
   const reconciliationBlocked = data.mode === 'RECONCILIATION_REQUIRED'
   const cycleStateLabel: Record<typeof cycleStatus.state, string> = {
@@ -101,7 +112,7 @@ export default function DashboardPage() {
       <section className="surface positions-surface"><div className="section-head"><h2>当前仓位</h2><span>{data.positions.length} / 3</span></div><PositionsTable positions={data.positions} /></section>
 
       <section className="dashboard-grid lower-grid">
-        <div className="surface"><div className="section-head"><h2>最近模型决策</h2><span>15 分钟周期</span></div><SignalsList signals={data.signals} /></div>
+        <div className="surface"><div className="section-head"><h2>{showPortfolioDecisionView ? '最近组合决策' : '最近模型决策'}</h2><span>{showPortfolioDecisionView ? 'Portfolio-v1 · 15 分钟周期' : '兼容历史信号'}</span></div>{showPortfolioDecisionView ? <PortfolioDecisionsList decisions={data.portfolio_decisions} cycleStatus={cycleStatus} /> : <SignalsList signals={data.signals} />}</div>
         <div className="surface"><div className="section-head"><h2>系统健康</h2><span>{data.health.ready ? '全部正常' : '需要处理'}</span></div><HealthList components={data.health.components} /></div>
       </section>
 

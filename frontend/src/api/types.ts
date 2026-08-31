@@ -116,6 +116,8 @@ export interface DashboardData {
   }
   positions: Position[]
   signals: Signal[]
+  /** Portfolio-v1 records shown ahead of legacy signal history. */
+  portfolio_decisions?: PortfolioDecision[]
   cycle_status: {
     state: 'RUNNING' | 'COMPLETED' | 'EXECUTED' | 'NO_CANDIDATES' | 'RISK_REJECTED' | 'MODEL_UNAVAILABLE' | 'MODEL_TIMEOUT' | 'MODEL_THROTTLED' | 'BLOCKED_RECONCILIATION' | 'EXCHANGE_UNAVAILABLE' | 'WORKER_BUSY' | 'WORKER_INTERRUPTED' | 'FAILED' | 'UNKNOWN'
     detail: string

@@ -597,6 +597,11 @@ class SystemController:
                 }
             ]
         signals = await self.repository.list_signals(limit=10)
+        # Portfolio-v1 is the active strategy entry point. Keep the legacy
+        # signal list for compatibility, but expose the latest portfolio
+        # records separately so the dashboard cannot mistake an old signal
+        # for the latest model decision.
+        portfolio_decisions = await self.repository.list_portfolio_decisions(limit=6)
         cycle_status = await self._cycle_status()
         return {
             "mode": mode.value,
@@ -634,6 +639,7 @@ class SystemController:
             },
             "positions": positions,
             "signals": signals,
+            "portfolio_decisions": portfolio_decisions,
             "cycle_status": cycle_status,
             "health": report.model_dump(mode="json"),
             "uptime_seconds": int((datetime.now(UTC) - self.started_at).total_seconds()),
