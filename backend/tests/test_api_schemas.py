@@ -201,11 +201,10 @@ def test_manual_advice_uses_the_same_target_ordering_as_manual_entry() -> None:
 @pytest.mark.parametrize(
     ("request_model", "payload"),
     [
-        (PasswordActionRequest, {"password": "operator-password", "legacy_phrase": "old"}),
-        (PasswordActionRequest, {"password": "operator-password", "legacy_code": "000000"}),
+        (PasswordActionRequest, {"password": "operator-password", "unexpected": "old"}),
         (
             ConfigUpdateRequest,
-            {"max_leverage": 3, "confirmation": "RUN CYCLE"},
+            {"max_leverage": 3, "password": "operator-password", "unexpected": "old"},
         ),
         (
             ReducePositionRequest,
@@ -214,7 +213,7 @@ def test_manual_advice_uses_the_same_target_ordering_as_manual_entry() -> None:
                 "fraction": "0.5",
                 "operation_id": "reduce-123",
                 "password": "operator-password",
-                "legacy_code": "000000",
+                "unexpected": "old",
             },
         ),
         (
@@ -228,20 +227,20 @@ def test_manual_advice_uses_the_same_target_ordering_as_manual_entry() -> None:
                 "tp1_r": "1",
                 "tp2_r": "2",
                 "password": "operator-password",
-                "legacy_phrase": "old",
+                "unexpected": "old",
             },
         ),
     ],
 )
-def test_sensitive_requests_reject_legacy_confirmation_fields(
+def test_sensitive_requests_reject_unknown_fields(
     request_model: type[object], payload: dict[str, object]
 ) -> None:
     with pytest.raises(ValidationError):
         request_model(**payload)  # type: ignore[call-arg]
 
 
-def test_integration_probe_request_has_no_password_or_legacy_confirmation_fields() -> None:
+def test_integration_probe_request_rejects_unknown_fields() -> None:
     request = IntegrationProbeRequest(target="testnet")
     assert request.target == "testnet"
     with pytest.raises(ValidationError):
-        IntegrationProbeRequest(target="testnet", legacy_code="000000")
+        IntegrationProbeRequest(target="testnet", unexpected="old")

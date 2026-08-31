@@ -16,7 +16,7 @@ class PasswordActionRequest(BaseModel):
     """Request body for sensitive actions guarded by the operator password.
 
     Rejecting unknown fields is intentional: old clients must not be able to
-    send confirmation words or one-time codes that the server silently ignores.
+    send deprecated confirmation fields that the server silently ignores.
     """
 
     model_config = ConfigDict(extra="forbid")

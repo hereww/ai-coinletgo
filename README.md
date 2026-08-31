@@ -81,7 +81,7 @@ cd backend
 .venv/bin/python -c 'from argon2 import PasswordHasher; import getpass; print(PasswordHasher().hash(getpass.getpass()))'
 ```
 
-将输出写入 `secrets/auth_password_hash`。敏感操作统一使用该操作密码验证，不再需要额外确认词或动态验证码。
+将输出写入 `secrets/auth_password_hash`。敏感操作统一只使用该操作密码验证。
 
 测试网和模型中转密钥可在服务器项目目录通过交互式脚本写入，输入不会回显：
 
