@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol, cast
@@ -302,7 +303,23 @@ NO_15M_TRIGGER，并填写基于当前价格的完整入场区间、止损和目
 达到 2.5R 以上，不要只给出刚好 2.0R 的目标。
 只返回所需 JSON；所有 thesis、summary 使用简体中文，
 reason_codes 和 risk_flags 使用机器可读英文代码。
+价格字段必须是只包含数字、小数点和可选负号的纯数字字符串；不要添加"#"、货币符号、反引号、单位或 Markdown 注释。
 """
+
+_STRUCTURED_NUMERIC_KEYS = frozenset(
+    {
+        "portfolio_risk_budget_fraction",
+        "allocation_fraction",
+        "confidence",
+        "entry_min",
+        "entry_max",
+        "stop_price",
+        "target_price",
+    }
+)
+_MARKED_NUMERIC = re.compile(
+    r"^\s*#+\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*$"
+)
 
 # Keep the opportunity policy explicit and separate from deterministic hard
 # risk checks.  In particular, the balanced profile must not collapse into an
@@ -665,7 +682,11 @@ class ResponsesModelClient:
         """Bound schema repair separately so one malformed response cannot
         monopolize a full strategy cycle."""
 
-        return min(max(float(self.settings.model_timeout_seconds) / 2, 20.0), 45.0)
+        # A full Qwen Portfolio-v1 response can legitimately take about one
+        # minute with the complete watchlist.  Keep repair bounded, but do not
+        # give it a shorter deadline than the provider's observed generation
+        # time or convert a repairable response into a false timeout.
+        return min(max(float(self.settings.model_timeout_seconds) * 0.75, 60.0), 120.0)
 
     async def _post(
         self, payload: dict[str, Any], *, timeout_seconds: float | None = None
@@ -1022,11 +1043,11 @@ class ResponsesModelClient:
     def _parse_structured_json(body: dict[str, Any]) -> dict[str, Any]:
         output_text = body.get("output_text")
         if isinstance(output_text, dict):
-            return cast(dict[str, Any], output_text)
+            return ResponsesModelClient._normalize_structured_payload(output_text)
         if isinstance(output_text, str):
             parsed = ResponsesModelClient._parse_json_text(output_text)
             if parsed is not None:
-                return parsed
+                return ResponsesModelClient._normalize_structured_payload(parsed)
         output = body.get("output", [])
         if not isinstance(output, list):
             raise ValueError("response output has invalid shape")
@@ -1040,18 +1061,41 @@ class ResponsesModelClient:
                 if not isinstance(content, dict):
                     continue
                 if isinstance(content.get("json"), dict):
-                    return cast(dict[str, Any], content["json"])
+                    return ResponsesModelClient._normalize_structured_payload(content["json"])
                 for key in ("parsed", "output_text", "text"):
                     value = content.get(key)
                     if isinstance(value, dict):
-                        return cast(dict[str, Any], value)
+                        return ResponsesModelClient._normalize_structured_payload(value)
                     if isinstance(value, str):
                         parsed = ResponsesModelClient._parse_json_text(value)
                         if parsed is not None:
-                            return parsed
+                            return ResponsesModelClient._normalize_structured_payload(parsed)
                 if isinstance(content.get("refusal"), str):
                     raise ValueError("model refused structured output")
         raise ValueError("response does not contain structured output")
+
+    @staticmethod
+    def _normalize_structured_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Normalize harmless Markdown numeric markers emitted by some Qwen relays.
+
+        Qwen can return an otherwise valid JSON number-as-string such as
+        ``"# 5.1500"`` when the prompt contains Markdown price examples.
+        Only known numeric fields and a strict numeric pattern are changed;
+        arbitrary model text is never coerced.
+        """
+
+        def normalize(value: Any, key: str | None = None) -> Any:
+            if isinstance(value, dict):
+                return {str(name): normalize(item, str(name)) for name, item in value.items()}
+            if isinstance(value, list):
+                return [normalize(item) for item in value]
+            if key in _STRUCTURED_NUMERIC_KEYS and isinstance(value, str):
+                match = _MARKED_NUMERIC.match(value)
+                if match:
+                    return match.group(1)
+            return value
+
+        return cast(dict[str, Any], normalize(payload))
 
     @staticmethod
     def _parse_json_text(value: str) -> dict[str, Any] | None:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from trading_system.api.controller import SystemController
+from trading_system.ai.client import ModelUnavailableError
 from trading_system.orchestration.cycle import CycleResult, TradingCycle
 
 
@@ -86,6 +87,14 @@ async def test_cycle_status_distinguishes_exchange_unavailable() -> None:
     assert result.detail.startswith("交易所请求失败")
     assert redis.status is not None
     assert redis.status["state"] == "EXCHANGE_UNAVAILABLE"
+
+
+def test_model_failure_detail_is_operator_friendly() -> None:
+    timeout = TradingCycle._model_failure_detail(
+        ModelUnavailableError("model relay repair request failed: timed out after 45s")
+    )
+    assert timeout == "模型服务响应超时，本轮未生成组合决策；现有仓位保护继续有效。"
+    assert "model relay" not in timeout
 
 
 @pytest.mark.asyncio

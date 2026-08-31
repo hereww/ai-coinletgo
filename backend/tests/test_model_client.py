@@ -79,6 +79,7 @@ async def test_valid_structured_response_and_sanitized_payload(tmp_path: object)
         )
     finally:
         await client.close()
+
     assert result.market_regime == "UNCERTAIN"
     payload_text = json.dumps(captured[0])
     assert "test-key" not in payload_text
@@ -133,6 +134,52 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
     assert Decimal(sent_candidate["entry_range_min_width_abs"]) == Decimal("0.20")
     assert Decimal(sent_candidate["stop_distance_min_abs"]) == Decimal("0.800")
     assert Decimal(sent_candidate["stop_distance_max_abs"]) == Decimal("2.500")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
+    tmp_path: object,
+) -> None:
+    calls = 0
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        output = {
+            "market_regime": "TRENDING",
+            "portfolio_risk_budget_fraction": 0.4,
+            "allocations": [{
+                "symbol": "BTCUSDT",
+                "target_side": "LONG",
+                "allocation_fraction": 1,
+                "priority": 1,
+                "confidence": 0.8,
+                "entry_min": "# 99.8",
+                "entry_max": "# 100.2",
+                "stop_price": "# 98.8",
+                "target_price": "# 103.0",
+                "thesis": "多头趋势延续",
+                "reason_codes": [],
+                "risk_flags": [],
+            }],
+            "summary": "组合探测",
+            "expires_at": expires_at.isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    client = ResponsesModelClient(model_settings(tmp_path), transport=httpx.MockTransport(handler))
+    try:
+        decision = await client.analyze_portfolio([snapshot()], [], expires_at)
+    finally:
+        await client.close()
+
+    assert calls == 1
+    allocation = decision.allocations[0]
+    assert allocation.entry_min == Decimal("99.8")
+    assert allocation.entry_max == Decimal("100.2")
+    assert allocation.stop_price == Decimal("98.8")
+    assert allocation.target_price == Decimal("103.0")
 
 
 @pytest.mark.asyncio

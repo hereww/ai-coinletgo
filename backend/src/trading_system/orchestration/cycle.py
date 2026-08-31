@@ -441,7 +441,10 @@ class TradingCycle:
             if self._is_model_cadence_error(error):
                 await self._mark_model_cadence()
             await self.notifier.send("模型中转异常", "模型不可用，本轮禁止新开仓。")
-            result.detail = str(error)
+            # Keep provider/relay internals in logs, but expose a stable and
+            # actionable status to the operator instead of leaking raw HTTP
+            # or timeout wording into the dashboard.
+            result.detail = self._model_failure_detail(error)
             return result
         await self._mark_model_cadence()
         logger.info(
@@ -588,6 +591,19 @@ class TradingCycle:
         if not result.detail:
             result.detail = "cycle completed"
         return result
+
+    @staticmethod
+    def _model_failure_detail(error: ModelUnavailableError) -> str:
+        detail = str(error).lower()
+        if "timed out" in detail or "timeout" in detail:
+            return "模型服务响应超时，本轮未生成组合决策；现有仓位保护继续有效。"
+        if "schema contract" in detail or "validation" in detail:
+            return "模型输出格式未通过本地校验，本轮未生成组合决策；现有仓位保护继续有效。"
+        if "budget" in detail or "throttl" in detail:
+            return "模型请求额度或节流门禁生效，本轮未生成组合决策；现有仓位保护继续有效。"
+        if "not configured" in detail or "https model endpoint" in detail:
+            return "模型服务未正确配置，本轮未生成组合决策；现有仓位保护继续有效。"
+        return "模型服务暂不可用，本轮未生成组合决策；现有仓位保护继续有效。"
 
     async def _trip_breaker(self, reasons: list[str]) -> None:
         await self.repository.set_mode(SystemMode.RISK_HALTED, halt_reason=",".join(reasons))
