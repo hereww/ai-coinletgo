@@ -5,6 +5,8 @@ import { api } from '../api/client'
 import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
 import { PageError, PageLoading } from '../components/PageState'
+import { CycleStatusBanner } from '../features/cycle/CycleStatusBanner'
+import { PortfolioDecisionsList } from '../features/dashboard/PortfolioDecisionsList'
 import { SignalDecisionDetails } from '../features/signals/SignalDecisionDetails'
 import { actionLabel, displayAdvice, displayReason, formatTime, resultClass, resultLabel } from '../features/signals/signalPresentation'
 
@@ -13,14 +15,25 @@ export default function SignalsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const deferredQuery = useDeferredValue(query.trim().toUpperCase())
   const signals = useQuery({ queryKey: ['signals'], queryFn: api.signals, refetchInterval: 15_000 })
-  if (signals.isLoading) return <><PageHeader title="模型信号" subtitle="结构化输出与硬风控结果" /><PageLoading /></>
-  if (signals.isError) return <><PageHeader title="模型信号" subtitle="结构化输出与硬风控结果" /><PageError message={signals.error.message} retry={() => signals.refetch()} /></>
+  const portfolio = useQuery({ queryKey: ['portfolio-decisions'], queryFn: api.portfolioDecisions, refetchInterval: 15_000 })
+  const cycle = useQuery({ queryKey: ['cycle-status'], queryFn: api.cycleStatus, refetchInterval: 15_000 })
+  if (signals.isLoading || portfolio.isLoading || cycle.isLoading) return <><PageHeader title="模型信号" subtitle="结构化输出与硬风控结果" /><PageLoading /></>
+  if (signals.isError || portfolio.isError || cycle.isError) {
+    const error = signals.error ?? portfolio.error ?? cycle.error
+    return <><PageHeader title="模型信号" subtitle="结构化输出与硬风控结果" /><PageError message={error?.message ?? '决策数据不可用'} retry={() => { void signals.refetch(); void portfolio.refetch(); void cycle.refetch() }} /></>
+  }
   const rows = (signals.data ?? []).filter((signal) => !deferredQuery || signal.symbol.includes(deferredQuery))
+  const portfolioRows = portfolio.data ?? []
   return (
     <>
       <PageHeader title="模型信号" subtitle="结构化输出与硬风控结果" actions={<label className="search-field"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选合约" /></label>} />
-      <section className="surface page-surface">
-        <div className="section-head"><h2>决策记录</h2><span>{rows.length} 条</span></div>
+      {cycle.data ? <CycleStatusBanner status={cycle.data} /> : null}
+      <section className="surface page-surface current-strategy-surface">
+        <div className="section-head"><h2>当前 Portfolio-v1 决策</h2><span>{portfolioRows.length ? `最新 ${formatTime(portfolioRows[0].created_at)}` : '等待新决策'}</span></div>
+        <PortfolioDecisionsList decisions={portfolioRows} cycleStatus={cycle.data!} />
+      </section>
+      <section className="surface page-surface legacy-signals-surface">
+        <div className="section-head"><h2>兼容历史逐币信号</h2><span>{rows.length} 条 · 旧版记录</span></div>
         {!rows.length ? <EmptyState title="没有匹配信号" detail="模型输出、中文原因和建议会按时间保留。" /> : <div className="table-scroll"><table className="data-table"><thead><tr><th>时间</th><th>合约</th><th>动作</th><th>置信度</th><th>结果</th><th>原因</th><th>AI建议</th><th>详情</th></tr></thead><tbody>{rows.map((signal) => {
           const expanded = expandedId === signal.id
           return <Fragment key={signal.id}>

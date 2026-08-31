@@ -13,6 +13,7 @@ import { PositionsTable } from '../features/dashboard/PositionsTable'
 import { PortfolioDecisionsList } from '../features/dashboard/PortfolioDecisionsList'
 import { RiskCapacity } from '../features/dashboard/RiskCapacity'
 import { SignalsList } from '../features/dashboard/SignalsList'
+import { CycleStatusBanner } from '../features/cycle/CycleStatusBanner'
 
 type Dialog = 'flatten' | 'unlock' | 'reconcile' | 'resume' | 'cycle' | 'manual-entry' | null
 
@@ -63,23 +64,6 @@ export default function DashboardPage() {
   const showPortfolioDecisionView = Boolean(data.portfolio_decisions?.length) || hasNewerPortfolioCycle
   const paused = ['PAUSED', 'RISK_HALTED', 'RECONCILIATION_REQUIRED'].includes(data.mode)
   const reconciliationBlocked = data.mode === 'RECONCILIATION_REQUIRED'
-  const cycleStateLabel: Record<typeof cycleStatus.state, string> = {
-    RUNNING: '本轮执行中',
-    COMPLETED: '本轮已完成',
-    EXECUTED: '本轮已有执行',
-    NO_CANDIDATES: '本轮无候选，未调用模型',
-    RISK_REJECTED: '模型已返回，但被硬风控拒绝',
-    MODEL_UNAVAILABLE: '模型不可用，本轮未增险',
-    MODEL_TIMEOUT: '模型响应超时，本轮未增险',
-    MODEL_THROTTLED: '模型节流中，本轮未重复调用',
-    BLOCKED_RECONCILIATION: '需先完成仓位对账，本轮未调用模型',
-    EXCHANGE_UNAVAILABLE: '交易所暂不可用，本轮未调用模型',
-    WORKER_BUSY: '上一轮仍在执行，本轮未重复启动',
-    WORKER_INTERRUPTED: 'Worker 中断，本轮未增险',
-    FAILED: '本轮异常，已安全停止',
-    UNKNOWN: '等待 Worker 状态',
-  }
-
   return (
     <>
       <div className="page-head">
@@ -94,11 +78,7 @@ export default function DashboardPage() {
         </div>
         {resume.error ? <div className="inline-error" role="alert">{resume.error.message}</div> : null}
         {runCycle.error ? <div className="inline-error" role="alert">{runCycle.error.message}</div> : null}
-        <div className={'cycle-status cycle-status-' + cycleStatus.state.toLowerCase()} role="status">
-          <strong>{cycleStateLabel[cycleStatus.state]}</strong>
-          <span>{cycleStatus.detail}</span>
-          <small>快照 {cycleStatus.snapshots} · 候选 {cycleStatus.candidates} · 模型输出 {cycleStatus.signals} · 执行 {cycleStatus.executed}</small>
-        </div>
+        <CycleStatusBanner status={cycleStatus} />
         {data.halt_reason ? <div className="inline-warning" role="status">系统暂停原因：{data.halt_reason}</div> : null}
       </div>
 

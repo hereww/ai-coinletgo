@@ -1,12 +1,19 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SignalsPage from './SignalsPage'
 
-const apiMock = vi.hoisted(() => ({ signals: vi.fn() }))
+const apiMock = vi.hoisted(() => ({ signals: vi.fn(), portfolioDecisions: vi.fn(), cycleStatus: vi.fn() }))
 vi.mock('../api/client', () => ({ api: apiMock }))
 
 describe('SignalsPage', () => {
+  afterEach(cleanup)
+
+  beforeEach(() => {
+    apiMock.portfolioDecisions.mockResolvedValue([])
+    apiMock.cycleStatus.mockResolvedValue({ state: 'UNKNOWN', detail: '等待状态', started_at: null, finished_at: null, snapshots: 0, candidates: 0, signals: 0, approved: 0, executed: 0, failed: false })
+  })
+
   it('shows unknown rejection states and expands legacy records safely', async () => {
     apiMock.signals.mockResolvedValue([{
       id: 'signal-legacy', symbol: 'ETHUSDT', action: 'OPEN_SHORT', result: 'REJECTED_UNKNOWN_SYMBOL', confidence: '0.55',
@@ -21,5 +28,19 @@ describe('SignalsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开' }))
     expect(await screen.findByText('该历史记录未保存决策时的行情快照。')).toBeInTheDocument()
     expect(screen.getByText('该历史记录未保存硬风控结论。')).toBeInTheDocument()
+  })
+
+  it('shows the current portfolio cycle before legacy signal history', async () => {
+    apiMock.signals.mockResolvedValue([{ symbol: 'OLDUSDT', id: 'old-signal', action: 'NO_TRADE', result: 'REJECTED', confidence: '0.5', reason: '旧信号', reason_codes: [], reason_codes_zh: [], risk_flags: [], risk_flags_zh: [], thesis: '', entry_min: null, entry_max: null, invalidation_price: null, target_price: null, horizon_minutes: 240, expires_at: null, market_context: null, risk_decision: null, created_at: '2026-08-28T10:45:00Z' }])
+    apiMock.portfolioDecisions.mockResolvedValue([{
+      id: 'decision-1', status: 'REJECTED', market_regime: 'TRENDING', portfolio_risk_budget_fraction: '1', model_name: 'Qwen/Qwen3.8-27B-FP8', prompt_version: 'portfolio-v1', created_at: '2026-08-31T11:17:24Z',
+      payload: { summary: '最新组合决策', expires_at: '2026-08-31T11:32:24Z', allocations: [{ allocation_id: 'a1', symbol: 'BTCUSDT', target_side: 'LONG', allocation_fraction: '1', priority: 1, confidence: '0.8', thesis: '趋势' }] }, allocations: [],
+    }])
+    apiMock.cycleStatus.mockResolvedValue({ state: 'RISK_REJECTED', detail: '组合决策完成', started_at: '2026-08-31T11:15:05Z', finished_at: '2026-08-31T11:17:24Z', snapshots: 30, candidates: 14, signals: 1, approved: 0, executed: 0, failed: false })
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><SignalsPage /></QueryClientProvider>)
+    expect(await screen.findByText('最新组合决策')).toBeInTheDocument()
+    expect(screen.getByText('当前 Portfolio-v1 决策')).toBeInTheDocument()
+    expect(screen.getByText('兼容历史逐币信号')).toBeInTheDocument()
+    expect(screen.getByText('组合决策完成')).toBeInTheDocument()
   })
 })

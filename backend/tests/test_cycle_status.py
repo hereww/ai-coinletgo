@@ -96,6 +96,11 @@ def test_model_failure_detail_is_operator_friendly() -> None:
     assert timeout == "模型服务响应超时，本轮未生成组合决策；现有仓位保护继续有效。"
     assert "model relay" not in timeout
 
+    direct_timeout = TradingCycle._model_failure_detail(
+        ModelUnavailableError("model relay request failed: timed out after 120s")
+    )
+    assert direct_timeout == timeout
+
 
 @pytest.mark.asyncio
 async def test_stale_cycle_lock_is_cleared_without_active_marker() -> None:

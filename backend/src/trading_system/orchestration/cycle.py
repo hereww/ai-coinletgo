@@ -672,7 +672,10 @@ class TradingCycle:
             if self._is_model_cadence_error(error):
                 await self._mark_model_cadence()
             await self.notifier.send("模型中转异常", "组合模型不可用，本轮禁止新增或调仓风险。")
-            result.detail = str(error)
+            # Portfolio-v1 has its own model call path; keep its failures on
+            # the same operator-safe wording as the legacy path so the
+            # dashboard never exposes relay internals.
+            result.detail = self._model_failure_detail(error)
             return result
         await self._mark_model_cadence()
         last_rebalance_at: datetime | None = None
