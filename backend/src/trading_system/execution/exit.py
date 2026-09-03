@@ -53,6 +53,12 @@ class ExitExecutionManager:
                 if await self._already_flat_after_rejection(position, error):
                     return []
                 raise
+            # Binance applies the symbol's LOT_SIZE filter when it accepts the
+            # limit exit.  Use the exchange-normalized quantity for all
+            # remainder math; otherwise a fractional tail that cannot be
+            # represented by MARKET_LOT_SIZE can produce precision/minimum
+            # failures during the market fallback.
+            quantity = order.quantity
             orders = [order]
             latest = order
             elapsed = 0

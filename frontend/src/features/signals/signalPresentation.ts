@@ -1,5 +1,7 @@
 import type { Signal } from '../../api/types'
 
+export const APP_TIME_ZONE = 'Asia/Shanghai'
+
 export const actionLabel = (action: Signal['action']) => ({
   OPEN_LONG: '开多',
   OPEN_SHORT: '开空',
@@ -23,8 +25,15 @@ export const displayReason = (signal: Signal) => signal.reason_zh ?? signal.reas
 
 export const displayAdvice = (signal: Signal) => signal.recommendation_zh ?? signal.ai_advice ?? '建议等待下一轮周期，确认趋势、触发和风险条件后再评估。'
 
+export const parseApiDate = (value: string) => {
+  // SQLite can return timezone-aware columns without an offset. Persisted API
+  // timestamps are UTC, so make that assumption explicit before parsing.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`
+  return new Date(normalized)
+}
+
 export const formatTime = (value: string, options: Intl.DateTimeFormatOptions = { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) =>
-  new Intl.DateTimeFormat('zh-CN', options).format(new Date(value))
+  new Intl.DateTimeFormat('zh-CN', { ...options, timeZone: APP_TIME_ZONE }).format(parseApiDate(value))
 
 export const formatNumber = (value: string | number | null | undefined, maximumFractionDigits = 6) => {
   if (value == null || value === '') return '—'

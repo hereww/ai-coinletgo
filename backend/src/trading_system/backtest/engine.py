@@ -57,6 +57,23 @@ class BacktestConfig:
     max_same_direction: int = 2
     correlation_limit: Decimal = Decimal("0.80")
     candidate_count: int = 5
+    max_spread_pct: Decimal = Decimal("0.0015")
+    max_abs_funding_rate: Decimal = Decimal("0.001")
+    max_abs_basis_pct: Decimal = Decimal("0.01")
+    min_book_depth_usdt: Decimal = Decimal("50000")
+    min_listing_days: int = 90
+    max_volatility_percentile: Decimal = Decimal("0.99")
+    entry_direction: str = "both"
+    entry_trigger: str = "breakout_or_pullback"
+    min_confidence: Decimal = Decimal("0.75")
+    min_net_reward_risk: Decimal = Decimal("2.0")
+    min_stop_atr: Decimal = Decimal("0.80")
+    max_stop_atr: Decimal = Decimal("2.50")
+    trend_adx_min: Decimal = Decimal("20")
+    volatility_soft_limit_percentile: Decimal = Decimal("0.75")
+    volatility_hard_limit_percentile: Decimal = Decimal("0.90")
+    elevated_volatility_risk_multiplier: Decimal = Decimal("0.75")
+    high_volatility_risk_multiplier: Decimal = Decimal("0.50")
 
 
 @dataclass
@@ -103,6 +120,7 @@ class BacktestResult:
 class BacktestEngine:
     def run(self, candles: list[Candle], config: BacktestConfig | None = None) -> BacktestResult:
         config = config or BacktestConfig()
+        self._active_config = config
         if len(candles) < 240:
             raise ValueError("at least 240 15-minute candles are required")
         equity = config.initial_equity
@@ -212,8 +230,13 @@ class BacktestEngine:
             equity_curve=curve,
         )
 
-    @staticmethod
-    def _signal(candles: list[Candle]) -> PositionSide | None:
+    def _signal(
+        self, candles: list[Candle], config: BacktestConfig | None = None
+    ) -> PositionSide | None:
+        if config is None:
+            config = getattr(self, "_active_config", None)
+        if config is None:
+            config = BacktestConfig()
         candles_15m = candles[-480:]
         candles_1h = aggregate_candles(candles, 4)
         candles_4h = aggregate_candles(candles, 16)
@@ -235,13 +258,33 @@ class BacktestEngine:
             candles_4h,
             Decimal("1000000"),
             book_depth_usdt=Decimal("1000000"),
+            trend_adx_min=config.trend_adx_min,
+            volatility_soft_limit_percentile=config.volatility_soft_limit_percentile,
+            volatility_hard_limit_percentile=config.volatility_hard_limit_percentile,
+            elevated_volatility_risk_multiplier=config.elevated_volatility_risk_multiplier,
+            high_volatility_risk_multiplier=config.high_volatility_risk_multiplier,
         )
-        eligible, _ = MarketScreener().eligible(snapshot)
+        eligible, _ = MarketScreener(
+            max_spread_pct=config.max_spread_pct,
+            max_abs_funding_rate=config.max_abs_funding_rate,
+            max_abs_basis_pct=config.max_abs_basis_pct,
+            min_book_depth_usdt=config.min_book_depth_usdt,
+            min_listing_days=config.min_listing_days,
+            max_volatility_percentile=config.max_volatility_percentile,
+            entry_trigger=config.entry_trigger,
+            trend_adx_min=config.trend_adx_min,
+            volatility_soft_limit_percentile=config.volatility_soft_limit_percentile,
+            volatility_hard_limit_percentile=config.volatility_hard_limit_percentile,
+        ).eligible(snapshot)
         if not eligible:
             return None
         trend_1h = trend_direction(candles_1h)
         trend_4h = trend_direction(candles_4h)
         if trend_1h == 0 or trend_1h != trend_4h:
+            return None
+        if config.entry_direction == "long_only" and trend_1h != 1:
+            return None
+        if config.entry_direction == "short_only" and trend_1h != -1:
             return None
         breakout = donchian_breakout(candles)
         pullback = pullback_signal(candles, trend_1h)

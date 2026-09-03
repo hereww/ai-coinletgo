@@ -32,7 +32,7 @@ async def test_manual_cycle_request_wakes_worker_without_waiting_for_boundary() 
 
 def test_cycle_schedule_uses_custom_epoch_aligned_interval() -> None:
     now = datetime(2026, 8, 23, 8, 14, 0, tzinfo=UTC)
-    assert seconds_until_next_cycle(15, now=now) == 65
+    assert seconds_until_next_cycle(5, now=now) == 65
     assert seconds_until_next_cycle(30, now=now) == 16 * 60 + 5
 
 
@@ -45,5 +45,5 @@ async def test_manual_request_is_coalesced_inside_current_model_cadence(
             assert key == "trading-cycle:model-last-slot"
             return "1920000"
 
-    monkeypatch.setattr(worker.time, "time", lambda: 1920000 * 15 * 60 + 5)
-    assert await _manual_request_is_in_current_cadence(Redis(), 15) is True  # type: ignore[arg-type]
+    monkeypatch.setattr(worker.time, "time", lambda: 1920000 * 5 * 60 + 5)
+    assert await _manual_request_is_in_current_cadence(Redis(), 5) is True  # type: ignore[arg-type]

@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import PositionsPage from './PositionsPage'
 
-const apiMock = vi.hoisted(() => ({ positions: vi.fn(), reducePosition: vi.fn() }))
+const apiMock = vi.hoisted(() => ({ positions: vi.fn(), config: vi.fn(), reducePosition: vi.fn() }))
 vi.mock('../api/client', () => ({ api: apiMock }))
 
 it('confirms a partial reduction with a fixed fraction and password', async () => {
@@ -12,6 +12,7 @@ it('confirms a partial reduction with a fixed fraction and password', async () =
     entry_price: '100', mark_price: '101', stop_price: '99', unrealized_pnl: '1',
     current_r: '1', protected: true, opened_at: new Date().toISOString(),
   }])
+  apiMock.config.mockResolvedValue({ max_positions: 10, max_same_direction: 5 })
   apiMock.reducePosition.mockResolvedValue({})
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PositionsPage /></QueryClientProvider>)
   fireEvent.click(await screen.findByRole('button', { name: '减仓' }))

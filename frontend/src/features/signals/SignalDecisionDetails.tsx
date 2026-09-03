@@ -31,6 +31,8 @@ export function SignalDecisionDetails({ signal }: { signal: Signal }) {
           <DetailMetric label="1h / 4h 趋势" value={`${trendLabel(market.trend_1h)} / ${trendLabel(market.trend_4h)}`} />
           <DetailMetric label="15m 触发" value={`${triggerLabel(market.breakout_15m, 'breakout')} / ${triggerLabel(market.pullback_15m, 'pullback')}`} />
           <DetailMetric label="ADX / ATR" value={`${formatNumber(market.adx_1h, 1)} / ${formatNumber(market.atr_15m)}`} />
+          <DetailMetric label="市场状态" value={regimeLabel(market.market_regime)} />
+          <DetailMetric label="波动分位 / 风险系数" value={`${formatPercent(market.volatility_percentile, 0)} / ${formatNumber(market.volatility_risk_multiplier, 2)}×`} />
           <DetailMetric label="成交量 Z-score" value={formatNumber(market.volume_zscore, 2)} />
           <DetailMetric label="资金费率" value={formatPercent(market.funding_rate, 4)} />
           <DetailMetric label="持仓量变化" value={formatPercent(market.open_interest_change_pct, 2)} />
@@ -47,6 +49,7 @@ export function SignalDecisionDetails({ signal }: { signal: Signal }) {
             <DetailMetric label="计算数量" value={formatNumber(decision.quantity)} />
             <DetailMetric label="杠杆" value={`${decision.leverage}×`} />
             <DetailMetric label="风险金额" value={`${formatNumber(decision.risk_amount_usdt, 2)} USDT`} />
+            <DetailMetric label="动态风险系数" value={`${formatNumber(decision.risk_multiplier, 2)}×`} />
             <DetailMetric label="预计保证金" value={`${formatNumber(decision.estimated_margin, 2)} USDT`} />
             <DetailMetric label="风控入场 / 止损" value={`${formatNumber(decision.entry_price)} / ${formatNumber(decision.stop_price)}`} />
             <DetailMetric label="风控目标 / 净盈亏比" value={`${formatNumber(decision.target_price)} / ${formatRatio(decision.net_reward_risk)}R`} />
@@ -58,6 +61,13 @@ export function SignalDecisionDetails({ signal }: { signal: Signal }) {
     </div>
   )
 }
+
+function regimeLabel(value: SignalMarketContextRegime | undefined) {
+  if (!value) return '历史数据未记录'
+  return ({ TRENDING: '趋势', RANGING: '震荡', VOLATILE: '极端波动', UNCERTAIN: '不确定' })[value] ?? '未知'
+}
+
+type SignalMarketContextRegime = NonNullable<Signal['market_context']>['market_regime']
 
 function DetailSection({ title, children }: { title: string; children: ReactNode }) {
   return <section className="signal-detail-section"><h3>{title}</h3><div className="signal-detail-grid">{children}</div></section>

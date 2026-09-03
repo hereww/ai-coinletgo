@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from trading_system.api.controller import SystemController
 from trading_system.ai.client import ModelUnavailableError
+from trading_system.api.controller import SystemController
 from trading_system.orchestration.cycle import CycleResult, TradingCycle
 
 

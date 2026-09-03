@@ -12,7 +12,7 @@ export default function SettingsPage() {
   const queryClient = useQueryClient()
   const dashboard = useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard, refetchInterval: 15_000 })
   const integrations = useQuery({ queryKey: ['integrations'], queryFn: api.integrations, refetchInterval: 15_000 })
-  const [modelForm, setModelForm] = useState({ base_url: '', model_name: 'gpt-5.6', reasoning_effort: 'medium' as IntegrationStatus['model']['reasoning_effort'], timeout_seconds: 120, daily_request_limit: 110, strategy_profile: 'trend_following' as IntegrationStatus['model']['strategy_profile'] })
+  const [modelForm, setModelForm] = useState({ base_url: '', model_name: 'gpt-5.6', reasoning_effort: 'medium' as IntegrationStatus['model']['reasoning_effort'], timeout_seconds: 120, strategy_profile: 'trend_following' as IntegrationStatus['model']['strategy_profile'] })
   const logout = useMutation({ mutationFn: api.logout, onSuccess: () => { queryClient.clear(); window.location.reload() } })
   const probeTestnet = useMutation({ mutationFn: () => api.probeIntegration('testnet'), onSuccess: () => integrations.refetch() })
   const probeModel = useMutation({ mutationFn: () => api.probeIntegration('model'), onSuccess: () => integrations.refetch() })
@@ -27,7 +27,7 @@ export default function SettingsPage() {
   useEffect(() => {
     const model = integrations.data?.model
     const relay = model?.profiles.find((profile) => profile.id === 'relay')
-    if (model && relay) setModelForm({ base_url: relay.base_url ?? '', model_name: relay.model_name, reasoning_effort: model.reasoning_effort, timeout_seconds: model.timeout_seconds, daily_request_limit: model.daily_request_limit, strategy_profile: model.strategy_profile })
+    if (model && relay) setModelForm({ base_url: relay.base_url ?? '', model_name: relay.model_name, reasoning_effort: model.reasoning_effort, timeout_seconds: model.timeout_seconds, strategy_profile: model.strategy_profile })
   }, [integrations.data])
   if (dashboard.isLoading || integrations.isLoading) return <><PageHeader title="设置" subtitle="接入、运行环境与会话" /><PageLoading /></>
   if (dashboard.isError || integrations.isError || !dashboard.data || !integrations.data) return <><PageHeader title="设置" subtitle="接入、运行环境与会话" /><PageError message={dashboard.error?.message ?? integrations.error?.message ?? '系统状态不可用'} retry={() => { dashboard.refetch(); integrations.refetch() }} /></>
@@ -89,7 +89,7 @@ export default function SettingsPage() {
             <label className="field-label">AI 策略模板<select value={modelForm.strategy_profile} onChange={(event) => setModelForm((value) => ({ ...value, strategy_profile: event.target.value as IntegrationStatus['model']['strategy_profile'] }))}><option value="trend_following">趋势跟随（默认）</option><option value="balanced">平衡</option><option value="conservative">保守</option><option value="scalping">短线</option></select></label>
             <label className="field-label">推理强度<select value={modelForm.reasoning_effort} onChange={(event) => setModelForm((value) => ({ ...value, reasoning_effort: event.target.value as IntegrationStatus['model']['reasoning_effort'] }))}><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
             <label className="field-label">超时（秒）<input type="number" min={2} max={120} value={modelForm.timeout_seconds} onChange={(event) => setModelForm((value) => ({ ...value, timeout_seconds: Number(event.target.value) }))} /></label>
-            <label className="field-label">每日请求上限<input type="number" min={1} max={110} value={modelForm.daily_request_limit} onChange={(event) => setModelForm((value) => ({ ...value, daily_request_limit: Number(event.target.value) }))} /></label>
+            <div className="field-label"><span>模型调用额度</span><div className="field-value">不限制</div></div>
           </div>
           <dl><div><dt>结构化探针</dt><dd className={model.health.state === 'HEALTHY' ? 'positive' : 'warning'}>{model.health.detail ?? model.health.state}</dd></div></dl>
           <p className="setup-note"><KeyRound size={14} /> 每个模型使用独立的服务器 secret；API Key 不进入浏览器、数据库或审计日志。结构化探针始终测试当前选中的模型。</p>

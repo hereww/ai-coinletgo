@@ -94,6 +94,31 @@ def test_compiler_allocates_new_candidate_under_hard_risk_cap() -> None:
     assert plan.approved_risk_usdt <= plan.risk_cap_usdt
 
 
+def test_compiler_applies_snapshot_volatility_risk_multiplier() -> None:
+    compiler = PortfolioCompiler()
+    full = compiler.compile(
+        decision(allocation()),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+    reduced = compiler.compile(
+        decision(allocation()),
+        snapshots={
+            "BTCUSDT": snapshot(volatility_risk_multiplier=Decimal("0.5"))
+        },
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+    assert reduced.actions[0].target_risk_usdt < full.actions[0].target_risk_usdt
+
+
 @pytest.mark.parametrize(
     ("side", "stop_price", "target_price", "risk_entry"),
     [
@@ -116,9 +141,14 @@ def test_compiler_sizes_new_position_from_worst_permitted_fill_edge(
         target_price=target_price,
     )
 
+    candidate_snapshot = snapshot(
+        trend_1h=-1,
+        trend_4h=-1,
+        breakout_15m=-1,
+    ) if side == PortfolioTargetSide.SHORT else snapshot()
     plan = PortfolioCompiler().compile(
         decision(requested),
-        snapshots={"BTCUSDT": snapshot()},
+        snapshots={"BTCUSDT": candidate_snapshot},
         account=context().account,
         positions=[],
         filters=filters(),

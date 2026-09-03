@@ -3,10 +3,11 @@ import { render, screen } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import ReplayPage from './ReplayPage'
 
-const apiMock = vi.hoisted(() => ({ replays: vi.fn(), createReplay: vi.fn(), portfolioDecisions: vi.fn() }))
+const apiMock = vi.hoisted(() => ({ replays: vi.fn(), createReplay: vi.fn(), portfolioDecisions: vi.fn(), config: vi.fn() }))
 vi.mock('../api/client', () => ({ api: apiMock }))
 
 it('shows replay task status and summary metrics', async () => {
+  apiMock.config.mockResolvedValue({})
   apiMock.replays.mockResolvedValue([{
     id: 'replay-1', status: 'COMPLETED',
     parameters: { mode: 'deterministic', symbols: ['BTCUSDT'], start_date: '2025-01-01', end_date: '2025-02-01' },
@@ -21,6 +22,7 @@ it('shows replay task status and summary metrics', async () => {
 })
 
 it('labels recorded portfolio verification separately from a performance replay', async () => {
+  apiMock.config.mockResolvedValue({})
   apiMock.replays.mockResolvedValue([{
     id: 'replay-2', status: 'COMPLETED',
     parameters: { mode: 'recorded_portfolio', portfolio_decision_id: 'decision-12345678' },

@@ -178,6 +178,66 @@ async def test_universe_skips_non_standard_testnet_symbols(tmp_path: object) -> 
 
 
 @pytest.mark.asyncio
+async def test_universe_skips_one_malformed_book_without_aborting_other_symbols(
+    tmp_path: object,
+) -> None:
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    symbols = ["BTCUSDT", "ETHUSDT"]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "symbol": symbol,
+                            "quoteAsset": "USDT",
+                            "contractType": "PERPETUAL",
+                            "status": "TRADING",
+                            "onboardDate": now_ms - 100 * 86_400_000,
+                        }
+                        for symbol in symbols
+                    ]
+                },
+            )
+        if request.url.path == "/fapi/v1/ticker/24hr":
+            return httpx.Response(
+                200,
+                json=[{"symbol": symbol, "quoteVolume": "100"} for symbol in symbols],
+            )
+        if request.url.path == "/fapi/v1/ticker/bookTicker":
+            return httpx.Response(
+                200,
+                json=[
+                    {"symbol": "BTCUSDT", "bidPrice": "101", "askPrice": "99"},
+                    {"symbol": "ETHUSDT", "bidPrice": "99", "askPrice": "101"},
+                ],
+            )
+        if request.url.path == "/fapi/v1/premiumIndex":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": symbol,
+                        "markPrice": "100",
+                        "indexPrice": "100",
+                        "lastFundingRate": "0",
+                    }
+                    for symbol in symbols
+                ],
+            )
+        raise AssertionError(request.url)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    try:
+        universe = await client.get_universe(30)
+    finally:
+        await client.close()
+    assert [item.symbol for item in universe] == ["ETHUSDT"]
+
+
+@pytest.mark.asyncio
 async def test_best_entry_price_uses_marketable_side_of_book(tmp_path: object) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/fapi/v1/ticker/bookTicker":

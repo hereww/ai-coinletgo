@@ -12,6 +12,7 @@ from trading_system.api.schemas import (
     ModelRelayUpdateRequest,
     PasswordActionRequest,
     ReducePositionRequest,
+    ReplayBacktestConfigRequest,
     ReplayRequest,
 )
 from trading_system.config import Settings
@@ -54,25 +55,33 @@ def test_replay_request_accepts_inclusive_year_and_rejects_invalid_ranges() -> N
             include_ai_sample=True,
         )
 
+    configured = ReplayRequest(
+        symbols=["BTCUSDT"],
+        start_date="2025-01-01",
+        end_date="2025-01-02",
+        backtest_config={
+            "max_leverage": 30,
+            "trend_adx_min": "18",
+            "volatility_soft_limit_percentile": "0.7",
+            "volatility_hard_limit_percentile": "0.9",
+        },
+    )
+    assert configured.backtest_config is not None
+    assert configured.backtest_config.max_leverage == 30
+    with pytest.raises(ValidationError, match="cannot exceed max_stop_atr"):
+        ReplayBacktestConfigRequest(stop_atr="3", max_stop_atr="2")
 
-def test_model_relay_config_accepts_http_urls_and_enforces_budget_ceiling() -> None:
+
+def test_model_relay_config_accepts_http_urls_without_a_daily_request_ceiling() -> None:
     request = ModelRelayUpdateRequest(
         base_url="https://relay.example.com/",
         model_name="gpt-5.6",
         reasoning_effort="medium",
-        daily_request_limit=110,
     )
     assert request.base_url == "https://relay.example.com"
 
     with pytest.raises(ValidationError, match="http:// or https://"):
         ModelRelayUpdateRequest(base_url="relay.example.com", model_name="gpt-5.6")
-    with pytest.raises(ValidationError):
-        ModelRelayUpdateRequest(
-            base_url="https://relay.example.com",
-            model_name="gpt-5.6",
-            daily_request_limit=111,
-        )
-
     assert ModelProfileSelectRequest(profile_id="vllm").profile_id == "vllm"
     with pytest.raises(ValidationError):
         ModelProfileSelectRequest(profile_id="unknown")
@@ -157,9 +166,27 @@ def test_settings_accept_custom_candidate_count_and_validate_stop_order() -> Non
     settings = Settings(candidate_count=25, min_stop_atr=0.2, max_stop_atr=4.5)
     assert settings.candidate_count == 25
     assert settings.min_stop_atr == 0.2
+    assert settings.min_net_reward_risk == 1.8
 
     with pytest.raises(ValueError, match="min_stop_atr cannot exceed max_stop_atr"):
         Settings(min_stop_atr=4.5, max_stop_atr=0.2)
+
+
+def test_live_settings_keep_a_two_r_minimum_reward_risk_floor(tmp_path: object) -> None:
+    settings = Settings(
+        binance_environment="live",
+        app_env="production",
+        auth_required=True,
+        cookie_secure=True,
+        secret_dir=tmp_path,
+        max_leverage=3,
+        single_trade_risk_pct=0.0025,
+        portfolio_risk_pct=0.0075,
+        candidate_count=5,
+        max_positions=3,
+        min_net_reward_risk=1.5,
+    )
+    assert settings.min_net_reward_risk == 2.0
 
 
 def test_manual_advice_uses_the_same_target_ordering_as_manual_entry() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -9,7 +10,6 @@ import pytest
 
 from tests.factories import position, snapshot
 from trading_system.ai.client import (
-    InMemoryDailyBudget,
     ModelRelayRequestError,
     ModelUnavailableError,
     ResponsesModelClient,
@@ -17,13 +17,12 @@ from trading_system.ai.client import (
 from trading_system.config import Settings
 
 
-def model_settings(tmp_path: object, *, limit: int = 110) -> Settings:
+def model_settings(tmp_path: object) -> Settings:
     path = tmp_path  # pytest Path typing is intentionally kept out of runtime code
     path.joinpath("model_api_key").write_text("test-key", encoding="utf-8")
     return Settings(
         secret_dir=path,
         model_base_url="https://model.example",
-        model_daily_request_limit=limit,
     )
 
 
@@ -70,7 +69,6 @@ async def test_valid_structured_response_and_sanitized_payload(tmp_path: object)
 
     client = ResponsesModelClient(
         model_settings(tmp_path),
-        InMemoryDailyBudget(),
         httpx.MockTransport(handler),
     )
     try:
@@ -124,7 +122,7 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
     assert "机会下限" in system_text
     assert "ADX_1h >= 20" in system_text
-    assert "不能仅因15分钟触发暂为0" in system_text
+    assert "没有同向触发时必须FLAT" in system_text
     assert "entry_range_min_width_abs" in system_text
     assert "不得只把当时的 best_bid、best_ask 原样复制成入场区间" in system_text
 
@@ -134,6 +132,35 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
     assert Decimal(sent_candidate["entry_range_min_width_abs"]) == Decimal("0.20")
     assert Decimal(sent_candidate["stop_distance_min_abs"]) == Decimal("0.800")
     assert Decimal(sent_candidate["stop_distance_max_abs"]) == Decimal("2.500")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_prompt_uses_runtime_reward_risk_floor(tmp_path: object) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "UNCERTAIN",
+            "portfolio_risk_budget_fraction": 0,
+            "allocations": [],
+            "summary": "当前无合格组合机会",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    settings = model_settings(tmp_path)
+    settings.min_net_reward_risk = 1.8
+    client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
+    try:
+        await client.analyze_portfolio([], [], datetime.now(UTC) + timedelta(minutes=15))
+    finally:
+        await client.close()
+
+    system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
+    assert "最低净盈亏比为 1.8R" in system_text
+    context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
+    assert context["entry_policy"]["min_net_reward_risk"] == 1.8
 
 
 @pytest.mark.asyncio
@@ -183,7 +210,7 @@ async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
 
 
 @pytest.mark.asyncio
-async def test_balanced_portfolio_prompt_is_not_trigger_only(tmp_path: object) -> None:
+async def test_balanced_portfolio_prompt_requires_a_directional_trigger(tmp_path: object) -> None:
     captured: list[dict[str, object]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -210,8 +237,8 @@ async def test_balanced_portfolio_prompt_is_not_trigger_only(tmp_path: object) -
         await client.close()
 
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
-    assert "ADX_1h >= 20" in system_text
-    assert "不得仅因 breakout_15m 和 pullback_15m 都为0就把组合预算设为0" in system_text
+    assert "同向15分钟" in system_text
+    assert "没有同向触发时必须FLAT" in system_text
 
 
 @pytest.mark.asyncio
@@ -443,6 +470,7 @@ async def test_portfolio_market_contract_repairs_one_spread_entry_range(
         atr_15m=Decimal("0.000355"),
         trend_1h=-1,
         trend_4h=-1,
+        breakout_15m=-1,
     )
     client = ResponsesModelClient(
         model_settings(tmp_path), transport=httpx.MockTransport(handler)
@@ -669,6 +697,7 @@ async def test_portfolio_short_geometry_is_repaired_instead_of_reaching_compiler
         atr_15m=Decimal("0.00060"),
         trend_1h=-1,
         trend_4h=-1,
+        breakout_15m=-1,
     )
     try:
         decision = await client.analyze_portfolio(
@@ -932,7 +961,43 @@ async def test_schema_failure_detail_is_bounded_and_non_sensitive(tmp_path: obje
 
 
 @pytest.mark.asyncio
-async def test_timeout_and_budget_exhaustion_fail_closed(tmp_path: object) -> None:
+async def test_schema_failures_log_bounded_redacted_diagnostics(
+    tmp_path: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "output_text": (
+                    '{"token":"should-not-leak","signals":["bad"]}'
+                    if calls == 1
+                    else "not-json"
+                )
+            },
+        )
+
+    caplog.set_level(logging.WARNING, logger="trading_system.ai.client")
+    client = ResponsesModelClient(model_settings(tmp_path), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ModelUnavailableError):
+            await client.analyze([], [], datetime.now(UTC) + timedelta(minutes=15))
+    finally:
+        await client.close()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("phase=signal-primary" in message for message in messages)
+    assert any("phase=signal-repair" in message for message in messages)
+    assert "should-not-leak" not in " ".join(messages)
+    assert "[REDACTED]" in " ".join(messages)
+    assert all(len(message) < 1000 for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_timeout_does_not_create_a_daily_request_lockout(tmp_path: object) -> None:
     calls = 0
 
     async def timeout_handler(request: httpx.Request) -> httpx.Response:
@@ -941,16 +1006,16 @@ async def test_timeout_and_budget_exhaustion_fail_closed(tmp_path: object) -> No
         raise httpx.ReadTimeout("relay timeout", request=request)
 
     client = ResponsesModelClient(
-        model_settings(tmp_path, limit=1), transport=httpx.MockTransport(timeout_handler)
+        model_settings(tmp_path), transport=httpx.MockTransport(timeout_handler)
     )
     try:
         with pytest.raises(ModelUnavailableError, match="request failed"):
             await client.analyze([], [], datetime.now(UTC) + timedelta(minutes=15))
-        with pytest.raises(ModelUnavailableError, match="budget exhausted"):
+        with pytest.raises(ModelUnavailableError, match="request failed"):
             await client.analyze([], [], datetime.now(UTC) + timedelta(minutes=15))
     finally:
         await client.close()
-    assert calls == 1
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -1121,6 +1186,11 @@ async def test_live_mode_rejects_plain_http_model_endpoint(tmp_path: object) -> 
         secret_dir=path,
         model_profile="vllm",
         vllm_model_base_url="http://vllm.example/v1",
+        max_leverage=3,
+        single_trade_risk_pct=0.0025,
+        portfolio_risk_pct=0.0075,
+        candidate_count=5,
+        max_positions=3,
     )
     client = ResponsesModelClient(
         settings,

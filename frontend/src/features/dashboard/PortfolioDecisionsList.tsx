@@ -1,6 +1,6 @@
 import { AlertTriangle, Layers3 } from 'lucide-react'
 import type { DashboardData, PortfolioDecision } from '../../api/types'
-import { formatPercent, formatTime } from '../signals/signalPresentation'
+import { formatPercent, formatTime, parseApiDate } from '../signals/signalPresentation'
 
 type CycleStatus = DashboardData['cycle_status']
 
@@ -12,11 +12,11 @@ const regimeLabel: Record<PortfolioDecision['market_regime'], string> = {
 }
 
 const statusLabel: Record<string, string> = {
-  APPROVED: '已批准',
-  PARTIALLY_APPROVED: '部分批准',
-  NO_ACTION: '无调仓',
-  REJECTED: '已拒绝',
-  EXECUTED: '已执行',
+  APPROVED: '风控已批准（待成交）',
+  PARTIALLY_APPROVED: '部分通过（待成交）',
+  NO_ACTION: '模型建议空仓（未下单）',
+  REJECTED: '模型意图被风控拒绝（未下单）',
+  EXECUTED: '已成交',
   FAILED: '执行失败',
 }
 
@@ -24,6 +24,18 @@ const statusClass = (status: string) => {
   if (status === 'APPROVED' || status === 'EXECUTED') return 'approved'
   if (status === 'NO_ACTION') return 'no_action'
   return 'rejected'
+}
+
+function decisionStatus(decision: PortfolioDecision) {
+  const executions = decision.allocations
+    .map((allocation) => allocation.execution?.status)
+    .filter(Boolean)
+  if (executions.includes('FAILED')) return { label: statusLabel.FAILED, status: 'FAILED' }
+  if (executions.includes('EXECUTED')) return { label: statusLabel.EXECUTED, status: 'EXECUTED' }
+  if (executions.includes('NO_FILL')) {
+    return { label: '风控已批准，本轮未成交', status: 'NO_ACTION' }
+  }
+  return { label: statusLabel[decision.status] ?? decision.status, status: decision.status }
 }
 
 const cycleNoticeStates = new Set([
@@ -55,7 +67,7 @@ const cycleNoticeLabel: Record<string, string> = {
 function isNewerCycle(cycle: CycleStatus, latest: PortfolioDecision | undefined) {
   if (!cycle.started_at) return false
   if (!latest) return true
-  return new Date(cycle.started_at).getTime() > new Date(latest.created_at).getTime()
+  return parseApiDate(cycle.started_at).getTime() > parseApiDate(latest.created_at).getTime()
 }
 
 export function PortfolioDecisionsList({
@@ -84,14 +96,15 @@ export function PortfolioDecisionsList({
         </article>
       ) : null}
 
-      {rows.length ? rows.slice(0, 3).map((decision) => (
-        <article className="portfolio-decision-entry" key={decision.id}>
+      {rows.length ? rows.slice(0, 3).map((decision) => {
+        const displayStatus = decisionStatus(decision)
+        return <article className="portfolio-decision-entry" key={decision.id}>
           <div className="portfolio-decision-head">
             <div>
               <Layers3 size={15} aria-hidden="true" />
               <strong>{regimeLabel[decision.market_regime]}组合</strong>
-              <span className={'result-text ' + statusClass(decision.status)}>
-                {statusLabel[decision.status] ?? decision.status}
+              <span className={'result-text ' + statusClass(displayStatus.status)}>
+                {displayStatus.label}
               </span>
             </div>
             <time>{formatTime(decision.created_at)}</time>
@@ -105,12 +118,12 @@ export function PortfolioDecisionsList({
           <div className="portfolio-decision-targets">
             {decision.payload.allocations.slice(0, 4).map((allocation) => (
               <span key={allocation.allocation_id}>
-                {allocation.symbol} · {allocation.target_side} · {formatPercent(allocation.allocation_fraction, 0)}
+                模型建议：{allocation.symbol} · {allocation.target_side} · {formatPercent(allocation.allocation_fraction, 0)}
               </span>
             ))}
           </div>
         </article>
-      )) : !showCycleNotice ? (
+      }) : !showCycleNotice ? (
         <div className="compact-empty">暂无组合决策</div>
       ) : null}
 
@@ -120,4 +133,3 @@ export function PortfolioDecisionsList({
     </div>
   )
 }
-

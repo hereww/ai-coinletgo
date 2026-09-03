@@ -46,7 +46,6 @@ const integrations = {
     model_name: 'gpt-5.6',
     reasoning_effort: 'medium',
     timeout_seconds: 45,
-    daily_request_limit: 110,
     strategy_profile: 'trend_following',
     api_key_configured: false,
     health: { name: 'model_relay', state: 'NOT_CONFIGURED', detail: 'model relay not configured', latency_ms: null, checked_at: new Date().toISOString() },
@@ -76,6 +75,8 @@ it('shows testnet and model integration state and runs a non-ordering testnet pr
   expect(screen.getByText('AI 模型 / Responses API')).toBeInTheDocument()
   expect(screen.getByText('Qwen/Qwen3.8-27B-FP8')).toBeInTheDocument()
   expect(screen.getByLabelText('AI 策略模板')).toHaveValue('trend_following')
+  expect(screen.getByText('模型调用额度')).toBeInTheDocument()
+  expect(screen.getByText('不限制')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: '测试 Binance 连接' }))
   await waitFor(() => expect(apiMock.probeIntegration).toHaveBeenCalledWith('testnet'))
 })

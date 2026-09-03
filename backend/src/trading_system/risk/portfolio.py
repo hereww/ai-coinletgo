@@ -94,7 +94,11 @@ class PortfolioCompiler:
 
         plan.requested_risk_usdt = sum(
             (
-                risk_cap * allocation.allocation_fraction
+                risk_cap
+                * allocation.allocation_fraction
+                * snapshots[allocation.symbol].volatility_risk_multiplier
+                if allocation.symbol in snapshots
+                else Decimal("0")
                 for allocation in decision.allocations
                 if allocation.target_side != PortfolioTargetSide.FLAT
             ),
@@ -295,6 +299,7 @@ class PortfolioCompiler:
         if distance <= 0:
             return self._rejected(allocation, "rounded_stop_invalid", position)
         target_risk = risk_cap * allocation.allocation_fraction
+        target_risk *= snapshot.volatility_risk_multiplier
         target_quantity = self._round_down(target_risk / distance, exchange_filters.step_size)
         if exchange_filters.max_quantity is not None:
             target_quantity = min(target_quantity, exchange_filters.max_quantity)
@@ -400,6 +405,18 @@ class PortfolioCompiler:
             return self._rejected(allocation, "confidence_below_minimum")
         if not self._direction_allowed(allocation.target_side, limits):
             return self._rejected(allocation, "entry_direction_not_allowed")
+        if not self._trend_matches_target(allocation.target_side, snapshot):
+            return self._rejected(allocation, "trend_not_aligned")
+        if snapshot.market_regime != "TRENDING":
+            return self._rejected(allocation, "market_regime_not_trending")
+        if snapshot.adx_1h < limits.trend_adx_min:
+            return self._rejected(allocation, "trend_strength_below_minimum")
+        if snapshot.volatility_risk_multiplier <= 0:
+            return self._rejected(allocation, "invalid_volatility_risk_multiplier")
+        if not self._entry_trigger_matches(
+            allocation.target_side, snapshot, limits.entry_trigger
+        ):
+            return self._rejected(allocation, "no_aligned_entry_trigger")
         if not self._valid_geometry(allocation, snapshot):
             return self._rejected(allocation, "invalid_price_geometry")
         entry = self._risk_entry(allocation, snapshot)
@@ -419,6 +436,7 @@ class PortfolioCompiler:
         if net_rr < limits.min_net_reward_risk:
             return self._rejected(allocation, "net_reward_risk_below_minimum")
         target_risk = risk_cap * allocation.allocation_fraction
+        target_risk *= snapshot.volatility_risk_multiplier
         quantity = self._round_down(target_risk / distance, exchange_filters.step_size)
         if quantity_limit is not None:
             quantity = min(quantity, self._round_down(quantity_limit, exchange_filters.step_size))
@@ -469,6 +487,18 @@ class PortfolioCompiler:
             return "invalid_price_geometry"
         if action.action == PortfolioPlanActionType.ADD:
             snapshot = snapshots[action.symbol]
+            if not self._trend_matches_target(allocation.target_side, snapshot):
+                return "trend_not_aligned"
+            if snapshot.market_regime != "TRENDING":
+                return "market_regime_not_trending"
+            if snapshot.adx_1h < limits.trend_adx_min:
+                return "trend_strength_below_minimum"
+            if snapshot.volatility_risk_multiplier <= 0:
+                return "invalid_volatility_risk_multiplier"
+            if not self._entry_trigger_matches(
+                allocation.target_side, snapshot, limits.entry_trigger
+            ):
+                return "no_aligned_entry_trigger"
             reference = self._reference_price(action, snapshot)
             stop_distance = abs(reference - action.stop_price)
             stop_atr = stop_distance / snapshot.atr_15m
@@ -555,6 +585,31 @@ class PortfolioCompiler:
         return not (
             (limits.entry_direction == "long_only" and side == PortfolioTargetSide.SHORT)
             or (limits.entry_direction == "short_only" and side == PortfolioTargetSide.LONG)
+        )
+
+    @staticmethod
+    def _trend_matches_target(
+        side: PortfolioTargetSide, snapshot: MarketSnapshot
+    ) -> bool:
+        if side == PortfolioTargetSide.LONG:
+            return snapshot.trend_1h == 1 and snapshot.trend_4h == 1
+        if side == PortfolioTargetSide.SHORT:
+            return snapshot.trend_1h == -1 and snapshot.trend_4h == -1
+        return False
+
+    @staticmethod
+    def _entry_trigger_matches(
+        side: PortfolioTargetSide,
+        snapshot: MarketSnapshot,
+        entry_trigger: str,
+    ) -> bool:
+        direction = 1 if side == PortfolioTargetSide.LONG else -1
+        if entry_trigger == "breakout_only":
+            return snapshot.breakout_15m == direction
+        if entry_trigger == "pullback_only":
+            return snapshot.pullback_15m == direction
+        return (
+            snapshot.breakout_15m == direction or snapshot.pullback_15m == direction
         )
 
     @staticmethod

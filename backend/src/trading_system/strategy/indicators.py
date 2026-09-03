@@ -7,6 +7,8 @@ from typing import Literal
 
 from trading_system.domain.models import Candle
 
+MarketRegime = Literal["TRENDING", "RANGING", "VOLATILE", "UNCERTAIN"]
+
 
 def ema(values: list[Decimal], period: int) -> list[Decimal]:
     if period <= 0 or not values:
@@ -94,21 +96,106 @@ def donchian_breakout(candles: list[Candle], period: int = 20) -> Literal[-1, 0,
 def pullback_signal(
     candles: list[Candle], trend: Literal[-1, 0, 1]
 ) -> Literal[-1, 0, 1]:
-    if len(candles) < 24 or trend == 0:
+    """Confirm a pullback after a recent directional breakout.
+
+    A candle merely touching EMA20 is not enough: the setup must first have a
+    same-direction Donchian break, then retrace toward EMA20/breakout level,
+    and finally close back in the trend direction within a bounded ATR move.
+    """
+    if len(candles) < 30 or trend == 0:
         return 0
     closes = [candle.close for candle in candles]
-    ema20 = ema(closes, 20)[-1]
-    current_atr = atr(candles)
+    ema20_values = ema(closes, 20)
+    current_atr = atr(candles[-50:])
     last = candles[-1]
     if current_atr <= 0:
         return 0
-    near_ema = abs(last.low - ema20) <= current_atr * Decimal("0.3")
-    if trend == 1 and near_ema and last.close > last.open and last.close > ema20:
-        return 1
-    near_ema = abs(last.high - ema20) <= current_atr * Decimal("0.3")
-    if trend == -1 and near_ema and last.close < last.open and last.close < ema20:
-        return -1
+    # Search only a recent window so a stale breakout cannot validate a new
+    # entry.  Exclude the current candle, which is the confirmation candle.
+    start = max(20, len(candles) - 6)
+    breakout_index: int | None = None
+    for index in range(start, len(candles) - 1):
+        previous = candles[max(0, index - 20) : index]
+        if len(previous) < 20:
+            continue
+        candidate = candles[index]
+        if trend == 1 and candidate.close > max(item.high for item in previous):
+            breakout_index = index
+        elif trend == -1 and candidate.close < min(item.low for item in previous):
+            breakout_index = index
+    if breakout_index is None or breakout_index >= len(candles) - 1:
+        return 0
+
+    breakout_level = (
+        max(item.high for item in candles[max(0, breakout_index - 20) : breakout_index])
+        if trend == 1
+        else min(item.low for item in candles[max(0, breakout_index - 20) : breakout_index])
+    )
+    ema20 = ema20_values[-1]
+    retrace_window = candles[breakout_index + 1 : -1]
+    if not retrace_window:
+        return 0
+    touched_retest = any(
+        item.low <= max(ema20, breakout_level) + current_atr * Decimal("0.35")
+        and item.high >= min(ema20, breakout_level) - current_atr * Decimal("0.35")
+        for item in retrace_window
+    )
+    last_ema = ema20
+    if trend == 1:
+        confirmed = (
+            last.close > last.open
+            and last.close > last_ema
+            and last.close > breakout_level
+        )
+        invalidated = min(item.close for item in retrace_window) < (
+            breakout_level - current_atr * Decimal("0.5")
+        )
+    else:
+        confirmed = (
+            last.close < last.open
+            and last.close < last_ema
+            and last.close < breakout_level
+        )
+        invalidated = max(item.close for item in retrace_window) > (
+            breakout_level + current_atr * Decimal("0.5")
+        )
+    if touched_retest and confirmed and not invalidated:
+        return trend
     return 0
+
+
+def classify_market_regime(
+    trend_1h: Literal[-1, 0, 1],
+    trend_4h: Literal[-1, 0, 1],
+    adx_1h: Decimal,
+    volatility_percentile: Decimal,
+    *,
+    trend_adx_min: Decimal = Decimal("20"),
+    volatility_soft_limit: Decimal = Decimal("0.75"),
+    volatility_hard_limit: Decimal = Decimal("0.90"),
+) -> MarketRegime:
+    if volatility_percentile >= volatility_hard_limit:
+        return "VOLATILE"
+    if trend_1h != 0 and trend_1h == trend_4h and adx_1h >= trend_adx_min:
+        return "TRENDING"
+    if volatility_percentile <= volatility_soft_limit:
+        return "RANGING"
+    return "UNCERTAIN"
+
+
+def volatility_risk_multiplier(
+    volatility_percentile: Decimal,
+    *,
+    soft_limit: Decimal = Decimal("0.75"),
+    hard_limit: Decimal = Decimal("0.90"),
+    elevated_multiplier: Decimal = Decimal("0.75"),
+    high_multiplier: Decimal = Decimal("0.50"),
+) -> Decimal:
+    if volatility_percentile >= hard_limit:
+        return high_multiplier
+    if volatility_percentile > soft_limit:
+        return elevated_multiplier
+    return Decimal("1")
 
 
 def volume_zscore(candles: list[Candle], period: int = 20) -> Decimal:

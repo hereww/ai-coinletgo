@@ -75,13 +75,13 @@ def test_risk_configuration_accepts_30x_and_rejects_more() -> None:
         assert reset.status_code == 200
 
 
-def test_scan_interval_is_configurable_from_15_to_120_minutes() -> None:
+def test_scan_interval_is_configurable_from_5_to_120_minutes() -> None:
     with TestClient(app) as client:
-        accepted = client.patch("/api/v1/config", json={"scan_interval_minutes": 30})
+        accepted = client.patch("/api/v1/config", json={"scan_interval_minutes": 5})
         assert accepted.status_code == 200
-        assert accepted.json()["scan_interval_minutes"] == 30
-        assert client.patch("/api/v1/config", json={"scan_interval_minutes": 14}).status_code == 422
+        assert accepted.json()["scan_interval_minutes"] == 5
+        assert client.patch("/api/v1/config", json={"scan_interval_minutes": 4}).status_code == 422
         too_slow = client.patch("/api/v1/config", json={"scan_interval_minutes": 121})
         assert too_slow.status_code == 422
-        reset = client.patch("/api/v1/config", json={"scan_interval_minutes": 15})
+        reset = client.patch("/api/v1/config", json={"scan_interval_minutes": 5})
         assert reset.status_code == 200

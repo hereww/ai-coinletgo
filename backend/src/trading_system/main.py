@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
-from trading_system.ai.client import RedisDailyBudget, ResponsesModelClient
+from trading_system.ai.client import ResponsesModelClient
 from trading_system.api.controller import SystemController
 from trading_system.api.routes import router
 from trading_system.api.security import SecurityService
@@ -34,9 +34,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     repository = Repository(database)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
-    model = ResponsesModelClient(settings, RedisDailyBudget(redis))
+    model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
-    replay_service = ReplayService(repository, exchange, notifier)
+    replay_service = ReplayService(repository, exchange, notifier, settings)
     controller = SystemController(settings, database, redis, repository, exchange, model)
 
     app.state.settings = settings

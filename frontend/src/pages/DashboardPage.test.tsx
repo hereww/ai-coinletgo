@@ -148,6 +148,35 @@ describe('DashboardPage', () => {
     expect(screen.queryByText('OLDUSDT')).not.toBeInTheDocument()
   })
 
+  it('distinguishes model intent, hard-risk rejection, and the configured position limit', async () => {
+    apiMock.dashboard.mockResolvedValue({
+      ...dashboard,
+      risk_capacity: {
+        ...dashboard.risk_capacity,
+        positions: { used: 0, limit: 10 },
+      },
+      portfolio_decisions: [{
+        id: 'portfolio-rejected', status: 'REJECTED', market_regime: 'TRENDING',
+        portfolio_risk_budget_fraction: '0.35', model_name: 'Qwen/Qwen3.8-27B-FP8',
+        prompt_version: 'portfolio-v1.3', created_at: '2026-09-03T01:13:58Z',
+        payload: { summary: '模型建议 ARB 做多。', expires_at: '2026-09-03T01:15:00Z', allocations: [{
+          allocation_id: 'allocation-rejected', symbol: 'ARBUSDT', target_side: 'LONG', allocation_fraction: '0.35', priority: 1, confidence: '0.68', thesis: '趋势一致',
+        }] },
+        allocations: [{
+          action_id: 'action-rejected', allocation_id: 'allocation-rejected', symbol: 'ARBUSDT',
+          action: 'REJECTED', side: 'LONG', confidence: '0.68', priority: 1,
+          status: 'REJECTED', reasons: ['net_reward_risk_below_minimum'],
+        }],
+      }],
+      cycle_status: { state: 'RISK_REJECTED', detail: '模型已返回，但被硬风控拒绝', started_at: '2026-09-03T01:13:50Z', finished_at: '2026-09-03T01:14:10Z', snapshots: 30, candidates: 11, signals: 1, approved: 0, executed: 0, failed: false },
+    })
+    renderPage()
+
+    expect(await screen.findByText('模型意图被风控拒绝（未下单）')).toBeInTheDocument()
+    expect(screen.getByText('模型建议：ARBUSDT · LONG · 35%')).toBeInTheDocument()
+    expect(screen.getAllByText('0 / 10')).toHaveLength(2)
+  })
+
   it('shows the current cycle timeout instead of presenting an old signal as latest', async () => {
     apiMock.dashboard.mockResolvedValue({
       ...dashboard,

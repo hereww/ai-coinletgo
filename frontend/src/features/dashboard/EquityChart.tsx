@@ -1,4 +1,5 @@
 import { Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { formatTime } from '../signals/signalPresentation'
 
 export function EquityChart({ data }: { data: Array<{ time: string; equity: string; drawdown: string }> }) {
   if (data.length < 2) {
@@ -6,7 +7,7 @@ export function EquityChart({ data }: { data: Array<{ time: string; equity: stri
   }
   const rows = data.map((item) => ({
     ...item,
-    label: new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(item.time)),
+    label: formatTime(item.time, { hour: '2-digit', minute: '2-digit' }),
     equity: Number(item.equity),
     drawdown: -Number(item.drawdown),
   }))

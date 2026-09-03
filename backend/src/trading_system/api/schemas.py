@@ -35,7 +35,6 @@ class ModelRelayUpdateRequest(BaseModel):
     model_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:/-]+$")
     reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
     timeout_seconds: float = Field(default=45.0, gt=1, le=120)
-    daily_request_limit: int = Field(default=110, ge=1, le=110)
     strategy_profile: Literal[
         "conservative", "balanced", "trend_following", "scalping"
     ] = "trend_following"
@@ -71,11 +70,16 @@ class ConfigUpdateRequest(BaseModel):
     entry_direction: Literal["both", "long_only", "short_only"] | None = None
     entry_trigger: Literal["breakout_or_pullback", "breakout_only", "pullback_only"] | None = None
     candidate_count: int | None = Field(default=None, ge=1)
-    scan_interval_minutes: int | None = Field(default=None, ge=15, le=120)
+    scan_interval_minutes: int | None = Field(default=None, ge=5, le=120)
     min_confidence: Decimal | None = Field(default=None, ge=0, le=1)
     min_net_reward_risk: Decimal | None = Field(default=None, gt=0)
     min_stop_atr: Decimal | None = Field(default=None, gt=0)
     max_stop_atr: Decimal | None = Field(default=None, gt=0)
+    trend_adx_min: Decimal | None = Field(default=None, ge=0)
+    volatility_soft_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
+    volatility_hard_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
+    elevated_volatility_risk_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
+    high_volatility_risk_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
     entry_symbols: list[str] | None = Field(default=None, max_length=30)
     portfolio_strategy_enabled: bool | None = None
     portfolio_rebalance_deadband_fraction: Decimal | None = Field(
@@ -108,6 +112,89 @@ class ConfigUpdateRequest(BaseModel):
         if self.min_stop_atr is not None and self.max_stop_atr is not None:
             if self.min_stop_atr > self.max_stop_atr:
                 raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if (
+            self.volatility_soft_limit_percentile is not None
+            and self.volatility_hard_limit_percentile is not None
+            and self.volatility_soft_limit_percentile
+            > self.volatility_hard_limit_percentile
+        ):
+            raise ValueError(
+                "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
+            )
+        return self
+
+
+class ReplayBacktestConfigRequest(BaseModel):
+    """Optional deterministic replay overrides.
+
+    The API resolves omitted values from the current runtime configuration
+    before persisting the replay.  Keeping overrides nested makes the saved
+    parameters self-contained and prevents a later config change from
+    changing the meaning of an already queued replay.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    initial_equity: Decimal | None = Field(default=None, gt=0)
+    risk_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    stop_atr: Decimal | None = Field(default=None, gt=0)
+    trailing_atr: Decimal | None = Field(default=None, gt=0)
+    fee_rate: Decimal | None = Field(default=None, ge=0, le=0.1)
+    slippage_rate: Decimal | None = Field(default=None, ge=0, le=0.1)
+    estimated_funding_rate: Decimal | None = Field(default=None, ge=-0.1, le=0.1)
+    daily_loss_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    max_drawdown_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    portfolio_risk_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    max_leverage: int | None = Field(default=None, ge=1, le=30)
+    max_margin_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    max_positions: int | None = Field(default=None, ge=1, le=100)
+    max_same_direction: int | None = Field(default=None, ge=1, le=100)
+    correlation_limit: Decimal | None = Field(default=None, ge=0, le=1)
+    candidate_count: int | None = Field(default=None, ge=1, le=30)
+    max_spread_pct: Decimal | None = Field(default=None, ge=0, le=1)
+    max_abs_funding_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    max_abs_basis_pct: Decimal | None = Field(default=None, ge=0, le=1)
+    min_book_depth_usdt: Decimal | None = Field(default=None, ge=0)
+    min_listing_days: int | None = Field(default=None, ge=0, le=10_000)
+    max_volatility_percentile: Decimal | None = Field(default=None, ge=0, le=1)
+    entry_direction: Literal["both", "long_only", "short_only"] | None = None
+    entry_trigger: Literal["breakout_or_pullback", "breakout_only", "pullback_only"] | None = None
+    min_confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    min_net_reward_risk: Decimal | None = Field(default=None, gt=0)
+    min_stop_atr: Decimal | None = Field(default=None, gt=0)
+    max_stop_atr: Decimal | None = Field(default=None, gt=0)
+    trend_adx_min: Decimal | None = Field(default=None, ge=0)
+    volatility_soft_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
+    volatility_hard_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
+    elevated_volatility_risk_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
+    high_volatility_risk_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> ReplayBacktestConfigRequest:
+        if (
+            self.stop_atr is not None
+            and self.min_stop_atr is not None
+            and self.stop_atr < self.min_stop_atr
+        ):
+            raise ValueError("stop_atr cannot be below min_stop_atr")
+        if (
+            self.stop_atr is not None
+            and self.max_stop_atr is not None
+            and self.stop_atr > self.max_stop_atr
+        ):
+            raise ValueError("stop_atr cannot exceed max_stop_atr")
+        if self.min_stop_atr is not None and self.max_stop_atr is not None:
+            if self.min_stop_atr > self.max_stop_atr:
+                raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if (
+            self.volatility_soft_limit_percentile is not None
+            and self.volatility_hard_limit_percentile is not None
+            and self.volatility_soft_limit_percentile
+            > self.volatility_hard_limit_percentile
+        ):
+            raise ValueError(
+                "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
+            )
         return self
 
 
@@ -125,6 +212,7 @@ class ReplayRequest(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     portfolio_decision_id: str | None = Field(default=None, min_length=36, max_length=36)
+    backtest_config: ReplayBacktestConfigRequest | None = None
     # Retained solely so older clients receive a clear validation failure instead
     # of silently interpreting a model sample as a backtest result.
     include_ai_sample: bool | None = None

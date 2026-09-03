@@ -29,7 +29,7 @@ class RiskEngine:
     ) -> RiskDecision:
         reasons = self._preflight(signal, snapshot, context)
         if reasons:
-            return self._reject(signal, reasons)
+            return self._reject_with_prices(signal, snapshot, reasons, context)
 
         entry = self._entry_price(signal, snapshot)
         stop = signal.invalidation_price or Decimal("0")
@@ -51,7 +51,10 @@ class RiskEngine:
             return self._reject(signal, ["net_reward_risk_below_minimum"])
 
         capital_base = min(context.account.equity, context.limits.capital_limit_usdt)
-        risk_amount = capital_base * context.limits.single_trade_risk_pct
+        risk_multiplier = snapshot.volatility_risk_multiplier
+        risk_amount = (
+            capital_base * context.limits.single_trade_risk_pct * risk_multiplier
+        )
         current_initial_risk = sum(
             (position.initial_risk_usdt for position in context.positions), Decimal("0")
         )
@@ -110,6 +113,7 @@ class RiskEngine:
             leverage=context.limits.max_leverage,
             estimated_margin=estimated_margin,
             net_reward_risk=net_reward_risk,
+            risk_multiplier=risk_multiplier,
         )
 
     def build_execution_intent(
@@ -169,6 +173,16 @@ class RiskEngine:
             reasons.append("signal_snapshot_symbol_mismatch")
         if signal.confidence < context.limits.min_confidence:
             reasons.append("confidence_below_minimum")
+        if snapshot.market_regime != "TRENDING":
+            reasons.append("market_regime_not_trending")
+        if snapshot.adx_1h < context.limits.trend_adx_min:
+            reasons.append("trend_strength_below_minimum")
+        if not self._trend_matches_signal(signal, snapshot):
+            reasons.append("trend_not_aligned")
+        if not self._entry_trigger_matches(signal, snapshot, context.limits.entry_trigger):
+            reasons.append("no_aligned_entry_trigger")
+        if snapshot.volatility_risk_multiplier <= 0:
+            reasons.append("invalid_volatility_risk_multiplier")
         if len(context.positions) >= context.limits.max_positions:
             reasons.append("position_count_limit_reached")
 
@@ -188,12 +202,33 @@ class RiskEngine:
 
         if signal.invalidation_price is not None:
             entry = self._entry_price(signal, snapshot)
+            if snapshot.atr_15m <= 0:
+                reasons.append("atr_invalid")
+                return reasons
             stop_atr = abs(entry - signal.invalidation_price) / snapshot.atr_15m
             if stop_atr < context.limits.min_stop_atr:
                 reasons.append("stop_too_close")
             if stop_atr > context.limits.max_stop_atr:
                 reasons.append("stop_too_far")
         return reasons
+
+    @staticmethod
+    def _trend_matches_signal(signal: TradeSignal, snapshot: MarketSnapshot) -> bool:
+        direction = 1 if signal.action == SignalAction.OPEN_LONG else -1
+        return snapshot.trend_1h == direction and snapshot.trend_4h == direction
+
+    @staticmethod
+    def _entry_trigger_matches(
+        signal: TradeSignal,
+        snapshot: MarketSnapshot,
+        entry_trigger: str,
+    ) -> bool:
+        direction = 1 if signal.action == SignalAction.OPEN_LONG else -1
+        if entry_trigger == "breakout_only":
+            return snapshot.breakout_15m == direction
+        if entry_trigger == "pullback_only":
+            return snapshot.pullback_15m == direction
+        return snapshot.breakout_15m == direction or snapshot.pullback_15m == direction
 
     @staticmethod
     def _entry_price(signal: TradeSignal, snapshot: MarketSnapshot) -> Decimal:
@@ -218,4 +253,34 @@ class RiskEngine:
     def _reject(signal: TradeSignal, reasons: list[str]) -> RiskDecision:
         return RiskDecision(
             signal_id=signal.signal_id, status=DecisionStatus.REJECTED, reasons=reasons
+        )
+
+    def _reject_with_prices(
+        self,
+        signal: TradeSignal,
+        snapshot: MarketSnapshot,
+        reasons: list[str],
+        context: RiskContext,
+    ) -> RiskDecision:
+        """Retain normalized prices on rejected decisions for audit/debugging."""
+        entry = self._entry_price(signal, snapshot)
+        stop = signal.invalidation_price or Decimal("0")
+        target = signal.target_price or Decimal("0")
+        if stop > 0:
+            entry = self._round_price(entry, context.filters.tick_size, ROUND_HALF_UP)
+            if signal.action == SignalAction.OPEN_LONG:
+                stop = self._round_price(stop, context.filters.tick_size, ROUND_DOWN)
+                if target > 0:
+                    target = self._round_price(target, context.filters.tick_size, ROUND_UP)
+            elif signal.action == SignalAction.OPEN_SHORT:
+                stop = self._round_price(stop, context.filters.tick_size, ROUND_UP)
+                if target > 0:
+                    target = self._round_price(target, context.filters.tick_size, ROUND_DOWN)
+        return RiskDecision(
+            signal_id=signal.signal_id,
+            status=DecisionStatus.REJECTED,
+            reasons=reasons,
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target,
         )

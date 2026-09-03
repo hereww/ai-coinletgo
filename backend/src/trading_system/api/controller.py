@@ -168,7 +168,6 @@ class SystemController:
                 "model_name": self.settings.active_model_name,
                 "reasoning_effort": self.settings.model_reasoning_effort,
                 "timeout_seconds": self.settings.model_timeout_seconds,
-                "daily_request_limit": self.settings.model_daily_request_limit,
                 "strategy_profile": self.settings.strategy_profile,
                 "api_key_configured": bool(self.settings.active_model_api_key),
                 "health": (await self._model_health()).model_dump(mode="json"),

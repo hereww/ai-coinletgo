@@ -5,16 +5,20 @@ import pytest
 
 from tests.factories import position, snapshot
 from trading_system.domain.enums import ReviewAction
-from trading_system.domain.models import ExchangeFilters, PositionReview
+from trading_system.domain.models import Candle, ExchangeFilters, PositionReview
 from trading_system.exchange.base import ExchangeError
 from trading_system.orchestration.cycle import CycleResult, TradingCycle
 from trading_system.strategy.indicators import (
     atr,
+    classify_market_regime,
     ema,
     pearson_correlation,
+    pullback_signal,
     trend_direction,
+    volatility_risk_multiplier,
 )
 from trading_system.strategy.screener import MarketScreener
+from trading_system.strategy.snapshot import volatility_percentile
 
 
 def test_indicator_basics_and_conservative_short_correlation() -> None:
@@ -22,6 +26,90 @@ def test_indicator_basics_and_conservative_short_correlation() -> None:
     assert atr([]) == 0
     assert trend_direction([]) == 0
     assert pearson_correlation([Decimal("1")] * 10, [Decimal("1")] * 10) == 1
+
+
+def test_market_regime_and_volatility_risk_scaling_are_deterministic() -> None:
+    assert classify_market_regime(1, 1, Decimal("25"), Decimal("0.6")) == "TRENDING"
+    assert classify_market_regime(1, -1, Decimal("25"), Decimal("0.6")) == "RANGING"
+    assert classify_market_regime(1, 1, Decimal("25"), Decimal("0.95")) == "VOLATILE"
+    assert volatility_risk_multiplier(Decimal("0.5")) == Decimal("1")
+    assert volatility_risk_multiplier(Decimal("0.8")) == Decimal("0.75")
+    assert volatility_risk_multiplier(Decimal("0.95")) == Decimal("0.50")
+
+
+def test_flat_atr_series_has_neutral_volatility_percentile() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles = [
+        Candle(
+            open_time=start,
+            close_time=start,
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=Decimal("1000"),
+        )
+        for _ in range(40)
+    ]
+    assert volatility_percentile(candles) == Decimal("0.5")
+
+
+def test_pullback_requires_a_recent_breakout_retest_and_confirmation() -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles = [
+        Candle(
+            open_time=start,
+            close_time=start,
+            open=Decimal("100"),
+            high=Decimal("100.4"),
+            low=Decimal("99.6"),
+            close=Decimal("100"),
+            volume=Decimal("1000"),
+        ).model_copy(
+            update={
+                "open_time": start.replace(minute=index % 60),
+                "close_time": start.replace(minute=index % 60),
+            }
+        )
+        for index in range(27)
+    ]
+    candles.extend(
+        [
+            Candle(
+                open_time=start,
+                close_time=start,
+                open=Decimal("100"),
+                high=Decimal("102.2"),
+                low=Decimal("99.9"),
+                close=Decimal("102"),
+                volume=Decimal("1500"),
+            ),
+            Candle(
+                open_time=start,
+                close_time=start,
+                open=Decimal("102"),
+                high=Decimal("102.1"),
+                low=Decimal("100.35"),
+                close=Decimal("100.8"),
+                volume=Decimal("1200"),
+            ),
+            Candle(
+                open_time=start,
+                close_time=start,
+                open=Decimal("100.8"),
+                high=Decimal("102.8"),
+                low=Decimal("100.7"),
+                close=Decimal("102.5"),
+                volume=Decimal("1600"),
+            ),
+        ]
+    )
+    assert pullback_signal(candles, 1) == 1
+    no_breakout = candles.copy()
+    no_breakout[-3] = no_breakout[-3].model_copy(
+        update={"high": Decimal("100.3"), "close": Decimal("100.2")}
+    )
+    assert pullback_signal(no_breakout, 1) == 0
 
 
 @pytest.mark.parametrize(

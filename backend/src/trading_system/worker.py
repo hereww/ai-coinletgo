@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from redis.asyncio import Redis
 
-from trading_system.ai.client import RedisDailyBudget, ResponsesModelClient
+from trading_system.ai.client import ResponsesModelClient
 from trading_system.config import get_settings
 from trading_system.exchange.binance import BinanceUSDMarketClient
 from trading_system.exchange.market_stream import BinanceUserDataStream
@@ -28,7 +28,7 @@ logger = logging.getLogger("trading-worker")
 
 
 def seconds_until_next_cycle(
-    interval_minutes: int = 15, *, now: datetime | None = None
+    interval_minutes: int = 5, *, now: datetime | None = None
 ) -> float:
     """Return seconds to the next epoch-aligned interval boundary plus five seconds."""
     current = now or datetime.now(UTC)
@@ -47,7 +47,7 @@ async def run_worker() -> None:
     repository = Repository(database, settings.app_timezone)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
-    model = ResponsesModelClient(settings, RedisDailyBudget(redis))
+    model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
     cycle = TradingCycle(settings, redis, repository, exchange, model, notifier)
     protection = PositionProtectionMonitor(
@@ -158,7 +158,7 @@ async def _wait_for_cycle(
     repository: Repository | None = None,
 ) -> None:
     loop = asyncio.get_running_loop()
-    interval = int(getattr(settings, "scan_interval_minutes", 15))
+    interval = int(getattr(settings, "scan_interval_minutes", 5))
     deadline = loop.time() + seconds_until_next_cycle(interval)
     next_reload = loop.time()
     logger.info(
@@ -207,12 +207,12 @@ async def _wait_for_cycle(
 
 
 async def _manual_request_is_in_current_cadence(redis: Redis, interval: int) -> bool:
-    """Coalesce manual requests that would duplicate this 15-minute slot."""
+    """Coalesce manual requests that would duplicate the current configured slot."""
     try:
         raw = await redis.get("trading-cycle:model-last-slot")
         if raw is None:
             return False
-        window = max(15, int(interval)) * 60
+        window = max(5, int(interval)) * 60
         current_slot = int((time.time() - 5) // window)
         return int(raw) == current_slot
     except (TypeError, ValueError):

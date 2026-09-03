@@ -27,6 +27,7 @@ export default function RiskPage() {
     mutationFn: (password: string) => api.updateConfig({ ...form, password }),
     onSuccess: (data) => {
       queryClient.setQueryData(['config'], data)
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       setConfirmOpen(false)
     },
   })
@@ -54,6 +55,8 @@ export default function RiskPage() {
       ['最低净盈亏比', form.min_net_reward_risk],
       ['最小止损距离', form.min_stop_atr],
       ['最大止损距离', form.max_stop_atr],
+      ['高波动风险系数', form.elevated_volatility_risk_multiplier ?? 0.75],
+      ['极端波动风险系数', form.high_volatility_risk_multiplier ?? 0.5],
     ]
     const invalidPositive = positiveFields.find(([, value]) => value === undefined || !Number.isFinite(value) || value <= 0)
     if (invalidPositive) {
@@ -72,6 +75,14 @@ export default function RiskPage() {
       setValidationError('最低置信度必须在 0% 到 100% 之间')
       return
     }
+    if (
+      form.volatility_soft_limit_percentile !== undefined
+      && form.volatility_hard_limit_percentile !== undefined
+      && form.volatility_soft_limit_percentile > form.volatility_hard_limit_percentile
+    ) {
+      setValidationError('高波动分位不能大于极端波动分位')
+      return
+    }
     if ((form.max_positions ?? 0) < 1 || (form.max_same_direction ?? 0) < 1 || (form.candidate_count ?? 0) < 1) {
       setValidationError('仓位数量和候选合约数量必须至少为 1')
       return
@@ -80,8 +91,8 @@ export default function RiskPage() {
       setValidationError('最高杠杆必须在 1 到 30 倍之间')
       return
     }
-    if ((form.scan_interval_minutes ?? 0) < 15 || (form.scan_interval_minutes ?? 0) > 120) {
-      setValidationError('扫描周期必须在 15 到 120 分钟之间')
+    if ((form.scan_interval_minutes ?? 0) < 5 || (form.scan_interval_minutes ?? 0) > 120) {
+      setValidationError('扫描周期必须在 5 到 120 分钟之间')
       return
     }
     setValidationError(null)
@@ -116,13 +127,19 @@ export default function RiskPage() {
           <SelectField label="允许开仓方向" value={form.entry_direction ?? 'both'} onChange={(value) => update('entry_direction', value)} options={[['both', '多空双向'], ['long_only', '仅做多'], ['short_only', '仅做空']]} />
           <SelectField label="入场触发" value={form.entry_trigger ?? 'breakout_or_pullback'} onChange={(value) => update('entry_trigger', value)} options={[['breakout_or_pullback', '突破或回踩'], ['breakout_only', '仅突破'], ['pullback_only', '仅回踩']]} />
           <NumberField label="候选合约数量" value={form.candidate_count ?? 5} step={1} onChange={(value) => update('candidate_count', value)} />
-          <NumberField label="扫描周期（分钟）" value={form.scan_interval_minutes ?? 15} step={5} min={15} max={120} onChange={(value) => update('scan_interval_minutes', value)} />
+          <NumberField label="扫描周期（分钟）" value={form.scan_interval_minutes ?? 5} step={5} min={5} max={120} onChange={(value) => update('scan_interval_minutes', value)} />
           <NumberField label="最低置信度 (%)" value={(form.min_confidence ?? 0.75) * 100} step={1} onChange={(value) => update('min_confidence', value / 100)} />
-          <NumberField label="最低净盈亏比" value={form.min_net_reward_risk ?? 2} step={0.1} onChange={(value) => update('min_net_reward_risk', value)} />
+          <NumberField label="最低净盈亏比" value={form.min_net_reward_risk ?? 1.8} step={0.1} min={1} onChange={(value) => update('min_net_reward_risk', value)} />
           <NumberField label="最小止损距离 (ATR)" value={form.min_stop_atr ?? 0.8} step={0.1} onChange={(value) => update('min_stop_atr', value)} />
           <NumberField label="最大止损距离 (ATR)" value={form.max_stop_atr ?? 2.5} step={0.1} onChange={(value) => update('max_stop_atr', value)} />
+          <NumberField label="最低趋势强度 (ADX)" value={form.trend_adx_min ?? 20} step={1} min={0} onChange={(value) => update('trend_adx_min', value)} />
+          <NumberField label="高波动分位 (%)" value={(form.volatility_soft_limit_percentile ?? 0.75) * 100} step={1} min={0} max={100} onChange={(value) => update('volatility_soft_limit_percentile', value / 100)} />
+          <NumberField label="极端波动分位 (%)" value={(form.volatility_hard_limit_percentile ?? 0.9) * 100} step={1} min={0} max={100} onChange={(value) => update('volatility_hard_limit_percentile', value / 100)} />
+          <NumberField label="高波动风险系数" value={form.elevated_volatility_risk_multiplier ?? 0.75} step={0.05} min={0.05} max={1} onChange={(value) => update('elevated_volatility_risk_multiplier', value)} />
+          <NumberField label="极端波动风险系数" value={form.high_volatility_risk_multiplier ?? 0.5} step={0.05} min={0.05} max={1} onChange={(value) => update('high_volatility_risk_multiplier', value)} />
         </div>
-        <p className="setup-note">扫描周期可设为 15–120 分钟，并按固定时间边界运行；15 分钟约为每天 96 次分析。受每日 110 次模型调用上限约束，不允许低于 15 分钟。保存后 Worker 会在等待期间自动重新计算下一次扫描时间。</p>
+        <p className="setup-note">系统只在趋势状态允许新开仓；波动率升高时会自动把风险预算缩减到配置系数，极端波动状态仍禁止新增风险。测试网建议最低净盈亏比保持在 1.8–2.0，继续降低会明显放大手续费和滑点影响。</p>
+        <p className="setup-note">扫描周期可设为 5–120 分钟，并按固定时间边界运行；5 分钟约为每天 288 次分析。保存后 Worker 会在等待期间自动重新计算下一次扫描时间。</p>
 
         <div className="section-head"><h2>账户级限制</h2><ShieldCheck size={18} /></div>
         <div className="settings-grid">
@@ -148,14 +165,14 @@ export default function RiskPage() {
         <p className="setup-note">Portfolio-v1 让 AI 输出组合风险预算和各币风险份额；数量、杠杆和订单细节仍由确定性风控计算。启用后只允许测试网执行，模型无效时不会产生调仓订单。</p>
 
         {validationError ? <div className="inline-error" role="alert">{validationError}</div> : null}
-        {save.error ? <div className="inline-error" role="alert">{save.error.message}</div> : null}
+        {save.error && !confirmOpen ? <div className="inline-error" role="alert">{save.error.message}</div> : null}
         {save.isSuccess ? <div className="success-note">开仓与风控配置已更新并写入审计日志</div> : null}
         <Button type="submit" variant="primary" icon={<Save size={15} />} disabled={save.isPending}>{save.isPending ? '保存中...' : '保存配置'}</Button>
       </form>
 
       <aside className="surface immutable-limits">
         <div className="section-head"><h2>不可放宽规则</h2></div>
-        <dl><div><dt>杠杆</dt><dd>1–30×</dd></div><div><dt>扫描周期</dt><dd>15–120 分钟</dd></div><div><dt>风险与止损数值</dt><dd>必须大于 0</dd></div><div><dt>止损区间</dt><dd>最小值 ≤ 最大值</dd></div><div><dt>置信度 / 相关性</dt><dd>0–1</dd></div><div><dt>补仓与马丁</dt><dd>禁止</dd></div></dl>
+        <dl><div><dt>杠杆</dt><dd>1–30×</dd></div><div><dt>扫描周期</dt><dd>5–120 分钟</dd></div><div><dt>风险与止损数值</dt><dd>必须大于 0</dd></div><div><dt>止损区间</dt><dd>最小值 ≤ 最大值</dd></div><div><dt>置信度 / 相关性</dt><dd>0–1</dd></div><div><dt>补仓与马丁</dt><dd>禁止</dd></div></dl>
         <p className="setup-note">AI 策略模板（趋势跟随、平衡、保守、短线）在“设置 → AI 中转 / Responses API”中选择。</p>
       </aside>
     </section>

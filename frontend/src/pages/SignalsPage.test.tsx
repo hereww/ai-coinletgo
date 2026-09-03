@@ -25,6 +25,7 @@ describe('SignalsPage', () => {
     }])
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><SignalsPage /></QueryClientProvider>)
     expect(await screen.findByText('已拒绝')).toBeInTheDocument()
+    expect(screen.getByText(/时间统一按北京时间/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '展开' }))
     expect(await screen.findByText('该历史记录未保存决策时的行情快照。')).toBeInTheDocument()
     expect(screen.getByText('该历史记录未保存硬风控结论。')).toBeInTheDocument()

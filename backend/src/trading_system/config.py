@@ -25,7 +25,6 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "model_profile",
         "model_reasoning_effort",
         "model_timeout_seconds",
-        "model_daily_request_limit",
         "strategy_profile",
         "entry_direction",
         "entry_trigger",
@@ -34,6 +33,11 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "min_net_reward_risk",
         "min_stop_atr",
         "max_stop_atr",
+        "trend_adx_min",
+        "volatility_soft_limit_percentile",
+        "volatility_hard_limit_percentile",
+        "elevated_volatility_risk_multiplier",
+        "high_volatility_risk_multiplier",
         "entry_symbols",
         "scan_interval_minutes",
         "portfolio_strategy_enabled",
@@ -103,7 +107,6 @@ class Settings(BaseSettings):
     # Keep the wait bounded, but do not turn a slow valid decision into a
     # misleading "model interrupted" state.
     model_timeout_seconds: float = 120.0
-    model_daily_request_limit: int = 110
     model_prompt_version: str = "signal-v1"
     portfolio_prompt_version: str = "portfolio-v1.3"
     strategy_profile: Literal[
@@ -116,26 +119,36 @@ class Settings(BaseSettings):
     entry_symbols: list[str] = Field(default_factory=list, max_length=30)
 
     capital_limit_usdt: float = Field(default=1_000.0, gt=0)
-    single_trade_risk_pct: float = Field(default=0.0025, gt=0)
-    portfolio_risk_pct: float = Field(default=0.0075, gt=0)
+    # Testnet can use a larger bounded risk budget for faster acceptance
+    # testing.  These values are deliberately capped for live mode below.
+    single_trade_risk_pct: float = Field(default=0.004, gt=0)
+    portfolio_risk_pct: float = Field(default=0.012, gt=0)
     daily_loss_pct: float = Field(default=0.01, gt=0)
     max_drawdown_pct: float = Field(default=0.05, gt=0)
-    max_leverage: int = Field(default=3, ge=1, le=30)
+    max_leverage: int = Field(default=30, ge=1, le=30)
     max_margin_pct: float = Field(default=0.20, gt=0)
-    max_positions: int = Field(default=3, ge=1)
+    max_positions: int = Field(default=4, ge=1)
     max_same_direction: int = Field(default=2, ge=1)
     correlation_limit: float = Field(default=0.80, ge=0, le=1)
     min_stop_atr: float = Field(default=0.80, gt=0)
     max_stop_atr: float = Field(default=2.50, gt=0)
+    trend_adx_min: float = Field(default=20.0, ge=0)
+    volatility_soft_limit_percentile: float = Field(default=0.75, ge=0, le=1)
+    volatility_hard_limit_percentile: float = Field(default=0.90, ge=0, le=1)
+    elevated_volatility_risk_multiplier: float = Field(default=0.75, gt=0, le=1)
+    high_volatility_risk_multiplier: float = Field(default=0.50, gt=0, le=1)
     min_confidence: float = Field(default=0.75, ge=0, le=1)
-    min_net_reward_risk: float = Field(default=2.0, gt=0)
+    min_net_reward_risk: float = Field(default=1.8, gt=0)
     max_spread_pct: float = 0.0015
     max_abs_funding_rate: float = 0.001
     max_abs_basis_pct: float = 0.01
     min_book_depth_usdt: float = 50_000.0
     universe_size: int = 30
-    candidate_count: int = Field(default=5, ge=1)
-    scan_interval_minutes: int = Field(default=15, ge=15, le=120)
+    candidate_count: int = Field(default=8, ge=1)
+    # Five minutes is the supported minimum.  It keeps the scheduler, model
+    # cadence gate, and signal expiry in one consistent slot while allowing a
+    # responsive testnet loop.
+    scan_interval_minutes: int = Field(default=5, ge=5, le=120)
     min_listing_days: int = 90
     # Portfolio-v1 is opt-in and may only execute on testnet.  Keeping it
     # disabled by default preserves the established signal-v1 behavior until
@@ -146,10 +159,60 @@ class Settings(BaseSettings):
 
     telegram_enabled: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_environment_risk_defaults(cls, value: object) -> object:
+        """Use an active testnet profile without weakening live defaults."""
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        live = str(data.get("binance_environment", "testnet")).lower() == "live"
+        defaults = (
+            {
+                "single_trade_risk_pct": 0.0025,
+                "portfolio_risk_pct": 0.0075,
+                "max_leverage": 3,
+                "max_positions": 3,
+                "candidate_count": 5,
+                "min_net_reward_risk": 2.0,
+            }
+            if live
+            else {
+                "single_trade_risk_pct": 0.004,
+                "portfolio_risk_pct": 0.012,
+                "max_leverage": 30,
+                "max_positions": 4,
+                "candidate_count": 8,
+                "min_net_reward_risk": 1.8,
+            }
+        )
+        for key, default in defaults.items():
+            current = data.get(key)
+            if current is None:
+                data[key] = default
+                continue
+            if not live:
+                continue
+            # Settings merges constructor values and dotenv values before this
+            # validator runs.  Clamp a stale testnet-only value here so a live
+            # process can never inherit the aggressive testnet profile.
+            if key in {"max_leverage", "max_positions", "candidate_count"}:
+                data[key] = min(int(current), int(default))
+            elif key == "min_net_reward_risk":
+                data[key] = max(float(current), float(default))
+            elif key in {"single_trade_risk_pct", "portfolio_risk_pct"}:
+                data[key] = min(float(current), float(default))
+        return data
+
     @model_validator(mode="after")
     def enforce_live_security(self) -> Settings:
         if self.min_stop_atr > self.max_stop_atr:
             raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if self.volatility_soft_limit_percentile > self.volatility_hard_limit_percentile:
+            raise ValueError(
+                "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
+            )
         if self.binance_environment == "live":
             if self.app_env != "production":
                 raise ValueError("live Binance environment requires APP_ENV=production")
@@ -157,6 +220,16 @@ class Settings(BaseSettings):
                 raise ValueError("live Binance environment requires AUTH_REQUIRED=true")
             if not self.cookie_secure:
                 raise ValueError("live Binance environment requires COOKIE_SECURE=true")
+            if self.max_leverage > 3:
+                raise ValueError("live Binance environment caps max_leverage at 3x")
+            if self.single_trade_risk_pct > 0.0025:
+                raise ValueError("live Binance environment caps single_trade_risk_pct at 0.25%")
+            if self.portfolio_risk_pct > 0.0075:
+                raise ValueError("live Binance environment caps portfolio_risk_pct at 0.75%")
+            if self.candidate_count > 5:
+                raise ValueError("live Binance environment caps candidate_count at 5")
+            if self.max_positions > 3:
+                raise ValueError("live Binance environment caps max_positions at 3")
         if self.app_env == "production":
             allowed_rest_hosts = (
                 {"fapi.binance.com"}

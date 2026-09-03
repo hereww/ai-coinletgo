@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -135,6 +136,99 @@ async def test_signal_api_rows_normalize_thesis_to_reason(tmp_path: object) -> N
         await database.dispose()
     assert rows[0]["reason"] == "本轮允许开多，信号已通过硬风控。"
     assert "建议按本轮信号的入场区间执行" in rows[0]["recommendation_zh"]
+
+
+@pytest.mark.asyncio
+async def test_signal_api_rows_use_signal_analysis_time_not_persistence_time(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'signal-time.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    analysis_time = datetime.now(UTC) - timedelta(minutes=45)
+    item = signal(
+        created_at=analysis_time,
+        expires_at=analysis_time + timedelta(minutes=15),
+    )
+    await repository.save_signal(
+        item,
+        status="REJECTED",
+        prompt_version="v1",
+        model_name="gpt-5.6",
+        input_hash="e" * 64,
+    )
+    try:
+        row = (await repository.list_signals())[0]
+    finally:
+        await database.dispose()
+    assert row["created_at"] == analysis_time.isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.asyncio
+async def test_signal_api_rows_ignore_anomalous_analysis_time(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'signal-time-outlier.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    item = signal(
+        created_at=datetime(2024, 5, 22, 10, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 5, 22, 10, 15, tzinfo=UTC),
+    )
+    await repository.save_signal(
+        item,
+        status="REJECTED",
+        prompt_version="v1",
+        model_name="gpt-5.6",
+        input_hash="f" * 64,
+    )
+    try:
+        row = (await repository.list_signals())[0]
+    finally:
+        await database.dispose()
+    assert isinstance(row["created_at"], datetime)
+    assert row["created_at"].year == datetime.now(UTC).year
+
+
+@pytest.mark.asyncio
+async def test_signal_api_rows_sort_by_signal_analysis_time(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'signal-order.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    base_time = datetime.now(UTC) - timedelta(minutes=30)
+    later_signal = signal(
+        symbol="LATERUSDT",
+        created_at=base_time,
+        expires_at=base_time + timedelta(minutes=15),
+    )
+    earlier_signal = signal(
+        symbol="EARLIERUSDT",
+        created_at=base_time - timedelta(minutes=5),
+        expires_at=base_time + timedelta(minutes=10),
+    )
+    # Persist the newer analysis first and the older analysis second so
+    # database insertion order is intentionally opposite signal time order.
+    await repository.save_signal(
+        later_signal,
+        status="REJECTED",
+        prompt_version="v1",
+        model_name="gpt-5.6",
+        input_hash="1" * 64,
+    )
+    await repository.save_signal(
+        earlier_signal,
+        status="REJECTED",
+        prompt_version="v1",
+        model_name="gpt-5.6",
+        input_hash="2" * 64,
+    )
+    try:
+        rows = await repository.list_signals()
+    finally:
+        await database.dispose()
+    assert [row["symbol"] for row in rows[:2]] == ["LATERUSDT", "EARLIERUSDT"]
 
 
 @pytest.mark.asyncio

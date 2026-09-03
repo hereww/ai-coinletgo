@@ -16,6 +16,9 @@ class MarketScreener:
         min_listing_days: int = 90,
         max_volatility_percentile: Decimal = Decimal("0.99"),
         entry_trigger: str = "breakout_or_pullback",
+        trend_adx_min: Decimal = Decimal("20"),
+        volatility_soft_limit_percentile: Decimal = Decimal("0.75"),
+        volatility_hard_limit_percentile: Decimal = Decimal("0.90"),
     ) -> None:
         self.max_spread_pct = max_spread_pct
         self.max_abs_funding_rate = max_abs_funding_rate
@@ -24,6 +27,9 @@ class MarketScreener:
         self.min_listing_days = min_listing_days
         self.max_volatility_percentile = max_volatility_percentile
         self.entry_trigger = entry_trigger
+        self.trend_adx_min = trend_adx_min
+        self.volatility_soft_limit_percentile = volatility_soft_limit_percentile
+        self.volatility_hard_limit_percentile = volatility_hard_limit_percentile
 
     def eligible(self, snapshot: MarketSnapshot) -> tuple[bool, list[str]]:
         reasons = self._market_reasons(snapshot) + self._setup_reasons(snapshot)
@@ -68,12 +74,20 @@ class MarketScreener:
             reasons.append("insufficient_book_depth")
         if snapshot.volatility_percentile > self.max_volatility_percentile:
             reasons.append("extreme_volatility")
+        if snapshot.market_regime == "VOLATILE":
+            reasons.append("volatile_regime")
+        elif snapshot.market_regime == "UNCERTAIN":
+            reasons.append("uncertain_regime")
         return reasons
 
     def _setup_reasons(self, snapshot: MarketSnapshot) -> list[str]:
         reasons: list[str] = []
         if snapshot.trend_1h == 0 or snapshot.trend_1h != snapshot.trend_4h:
             reasons.append("trend_not_aligned")
+        if snapshot.adx_1h < self.trend_adx_min:
+            reasons.append("trend_strength_below_minimum")
+        if snapshot.market_regime != "TRENDING":
+            reasons.append("market_regime_not_trending")
         triggers = {
             "breakout_only": snapshot.breakout_15m,
             "pullback_only": snapshot.pullback_15m,

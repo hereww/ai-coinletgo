@@ -41,6 +41,27 @@ def test_configured_leverage_can_reach_30_without_increasing_risk_amount() -> No
     assert leveraged.estimated_margin < baseline.estimated_margin
 
 
+def test_high_volatility_reduces_risk_budget_without_changing_leverage() -> None:
+    engine = RiskEngine()
+    baseline = engine.evaluate(signal(), snapshot(), context())
+    reduced = engine.evaluate(
+        signal(),
+        snapshot(volatility_risk_multiplier=Decimal("0.5")),
+        context(),
+    )
+    assert reduced.status == DecisionStatus.APPROVED
+    assert reduced.risk_multiplier == Decimal("0.5")
+    assert reduced.risk_amount_usdt < baseline.risk_amount_usdt
+    assert reduced.leverage == baseline.leverage
+
+
+@pytest.mark.parametrize("regime", ["RANGING", "VOLATILE", "UNCERTAIN"])
+def test_new_entries_require_trending_market_regime(regime: str) -> None:
+    decision = RiskEngine().evaluate(signal(), snapshot(market_regime=regime), context())
+    assert decision.status == DecisionStatus.REJECTED
+    assert "market_regime_not_trending" in decision.reasons
+
+
 def test_stop_rounding_is_conservative_for_long_and_short() -> None:
     engine = RiskEngine()
     long_signal = signal(invalidation_price=Decimal("99.04"), target_price=Decimal("104"))

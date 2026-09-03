@@ -60,6 +60,8 @@ class MarketSnapshot(BaseModel):
     pullback_15m: Literal[-1, 0, 1]
     volume_zscore: Decimal
     volatility_percentile: Decimal = Field(ge=0, le=1)
+    market_regime: Literal["TRENDING", "RANGING", "VOLATILE", "UNCERTAIN"] = "UNCERTAIN"
+    volatility_risk_multiplier: PositiveDecimal = Decimal("1")
     listing_days: int = Field(ge=0)
     status: str = "TRADING"
     score: Decimal = Decimal("0")
@@ -80,6 +82,12 @@ class UniverseSymbol(BaseModel):
     mark_price: PositiveDecimal
     index_price: PositiveDecimal
     funding_rate: Decimal
+
+    @model_validator(mode="after")
+    def validate_book_order(self) -> UniverseSymbol:
+        if self.best_bid > self.best_ask:
+            raise ValueError("best_bid cannot exceed best_ask")
+        return self
 
     @property
     def spread_pct(self) -> Decimal:
@@ -263,6 +271,14 @@ class RiskLimits(BaseModel):
     min_confidence: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
     min_net_reward_risk: PositiveDecimal = Decimal("2.0")
     entry_direction: Literal["both", "long_only", "short_only"] = "both"
+    entry_trigger: Literal["breakout_or_pullback", "breakout_only", "pullback_only"] = (
+        "breakout_or_pullback"
+    )
+    trend_adx_min: NonNegativeDecimal = Decimal("20")
+    volatility_soft_limit_percentile: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
+    volatility_hard_limit_percentile: Decimal = Field(default=Decimal("0.90"), ge=0, le=1)
+    elevated_volatility_risk_multiplier: PositiveDecimal = Decimal("0.75")
+    high_volatility_risk_multiplier: PositiveDecimal = Decimal("0.50")
     portfolio_rebalance_deadband_fraction: Decimal = Field(
         default=Decimal("0.10"), ge=0, le=1
     )
@@ -271,6 +287,14 @@ class RiskLimits(BaseModel):
     def validate_stop_range(self) -> RiskLimits:
         if self.min_stop_atr > self.max_stop_atr:
             raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if self.volatility_soft_limit_percentile > self.volatility_hard_limit_percentile:
+            raise ValueError(
+                "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
+            )
+        if self.elevated_volatility_risk_multiplier > Decimal("1"):
+            raise ValueError("elevated_volatility_risk_multiplier cannot exceed 1")
+        if self.high_volatility_risk_multiplier > Decimal("1"):
+            raise ValueError("high_volatility_risk_multiplier cannot exceed 1")
         return self
 
 
@@ -299,6 +323,7 @@ class RiskDecision(BaseModel):
     leverage: int = 1
     estimated_margin: NonNegativeDecimal = Decimal("0")
     net_reward_risk: Decimal = Decimal("0")
+    risk_multiplier: PositiveDecimal = Decimal("1")
     decided_at: datetime = Field(default_factory=utc_now)
 
 

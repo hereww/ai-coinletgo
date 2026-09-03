@@ -45,6 +45,9 @@ export interface SignalMarketContext {
   breakout_15m: -1 | 0 | 1
   pullback_15m: -1 | 0 | 1
   volume_zscore: string
+  market_regime?: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'UNCERTAIN'
+  volatility_percentile?: string
+  volatility_risk_multiplier?: string
 }
 
 export interface RiskDecision {
@@ -62,6 +65,7 @@ export interface RiskDecision {
   leverage: number
   estimated_margin: string
   net_reward_risk: string
+  risk_multiplier?: string
   decided_at: string
 }
 
@@ -158,10 +162,14 @@ export interface RiskConfig {
   min_net_reward_risk: number
   min_stop_atr: number
   max_stop_atr: number
+  trend_adx_min?: number
+  volatility_soft_limit_percentile?: number
+  volatility_hard_limit_percentile?: number
+  elevated_volatility_risk_multiplier?: number
+  high_volatility_risk_multiplier?: number
   entry_symbols: string[]
   model_name: string
   strategy_profile?: 'conservative' | 'balanced' | 'trend_following' | 'scalping'
-  model_daily_request_limit: number
   portfolio_strategy_enabled: boolean
   portfolio_rebalance_deadband_fraction: number
   portfolio_rebalance_cooldown_minutes: number
@@ -247,7 +255,11 @@ export interface MarketRow {
   trend_1h: -1 | 0 | 1
   trend_4h: -1 | 0 | 1
   breakout_15m: -1 | 0 | 1
+  pullback_15m?: -1 | 0 | 1
   volume_zscore: string
+  market_regime?: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'UNCERTAIN'
+  volatility_percentile?: string
+  volatility_risk_multiplier?: string
   score: string
   timestamp: string
 }
@@ -280,6 +292,7 @@ export interface ReplayRun {
     start_date?: string | null
     end_date?: string | null
     portfolio_decision_id?: string | null
+    backtest_config?: Record<string, string | number | null>
   }
   metrics: Record<string, unknown>
   created_at: string
@@ -317,7 +330,6 @@ export interface IntegrationStatus {
     model_name: string
     reasoning_effort: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
     timeout_seconds: number
-    daily_request_limit: number
     strategy_profile: 'conservative' | 'balanced' | 'trend_following' | 'scalping'
     api_key_configured: boolean
     health: HealthComponent

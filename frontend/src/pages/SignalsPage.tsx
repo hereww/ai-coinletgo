@@ -34,7 +34,8 @@ export default function SignalsPage() {
       </section>
       <section className="surface page-surface legacy-signals-surface">
         <div className="section-head"><h2>兼容历史逐币信号</h2><span>{rows.length} 条 · 旧版记录</span></div>
-        {!rows.length ? <EmptyState title="没有匹配信号" detail="模型输出、中文原因和建议会按时间保留。" /> : <div className="table-scroll"><table className="data-table"><thead><tr><th>时间</th><th>合约</th><th>动作</th><th>置信度</th><th>结果</th><th>原因</th><th>AI建议</th><th>详情</th></tr></thead><tbody>{rows.map((signal) => {
+        <p className="setup-note">此处仅保留 Portfolio-v1 启用前的旧版逐币信号；当前周期请以上方 Portfolio-v1 决策为准。时间统一按北京时间（UTC+8）显示。</p>
+        {!rows.length ? <EmptyState title="没有匹配信号" detail="模型输出、中文原因和建议会按时间保留。" /> : <div className="table-scroll"><table className="data-table"><thead><tr><th>时间（北京时间）</th><th>合约</th><th>动作</th><th>置信度</th><th>结果</th><th>原因</th><th>AI建议</th><th>详情</th></tr></thead><tbody>{rows.map((signal) => {
           const expanded = expandedId === signal.id
           return <Fragment key={signal.id}>
             <tr>

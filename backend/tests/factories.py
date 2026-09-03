@@ -37,6 +37,8 @@ def snapshot(**updates: object) -> MarketSnapshot:
         "pullback_15m": 0,
         "volume_zscore": Decimal("2"),
         "volatility_percentile": Decimal("0.5"),
+        "market_regime": "TRENDING",
+        "volatility_risk_multiplier": Decimal("1"),
         "listing_days": 365,
         "recent_returns_1h": [Decimal(index) / Decimal("10000") for index in range(30)],
     }

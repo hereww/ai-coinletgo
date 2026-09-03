@@ -89,10 +89,10 @@ export default function DashboardPage() {
         <div className="surface risk-surface"><div className="section-head"><h2>风险容量</h2><span>{data.health.ready ? '门禁正常' : '门禁未通过'}</span></div><RiskCapacity data={data.risk_capacity} /></div>
       </section>
 
-      <section className="surface positions-surface"><div className="section-head"><h2>当前仓位</h2><span>{data.positions.length} / 3</span></div><PositionsTable positions={data.positions} /></section>
+      <section className="surface positions-surface"><div className="section-head"><h2>当前仓位</h2><span>{data.positions.length} / {data.risk_capacity.positions.limit}</span></div><PositionsTable positions={data.positions} /></section>
 
       <section className="dashboard-grid lower-grid">
-        <div className="surface"><div className="section-head"><h2>{showPortfolioDecisionView ? '最近组合决策' : '最近模型决策'}</h2><span>{showPortfolioDecisionView ? 'Portfolio-v1 · 15 分钟周期' : '兼容历史信号'}</span></div>{showPortfolioDecisionView ? <PortfolioDecisionsList decisions={data.portfolio_decisions} cycleStatus={cycleStatus} /> : <SignalsList signals={data.signals} />}</div>
+        <div className="surface"><div className="section-head"><h2>{showPortfolioDecisionView ? '最近组合决策' : '最近模型决策'}</h2><span>{showPortfolioDecisionView ? 'Portfolio-v1 · 按配置周期运行' : '兼容历史信号'}</span></div>{showPortfolioDecisionView ? <PortfolioDecisionsList decisions={data.portfolio_decisions} cycleStatus={cycleStatus} /> : <SignalsList signals={data.signals} />}</div>
         <div className="surface"><div className="section-head"><h2>系统健康</h2><span>{data.health.ready ? '全部正常' : '需要处理'}</span></div><HealthList components={data.health.components} /></div>
       </section>
 

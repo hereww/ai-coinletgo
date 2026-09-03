@@ -5,6 +5,7 @@ import { api } from '../api/client'
 import { EmptyState } from '../components/EmptyState'
 import { PageHeader } from '../components/PageHeader'
 import { PageError, PageLoading } from '../components/PageState'
+import { formatTime } from '../features/signals/signalPresentation'
 import type { PortfolioDecision } from '../api/types'
 import { CycleStatusBanner } from '../features/cycle/CycleStatusBanner'
 
@@ -54,7 +55,7 @@ export default function PortfolioPage() {
         const payload = decision.payload
         return <Fragment key={decision.id}>
           <tr key={decision.id}>
-            <td>{new Date(decision.created_at).toLocaleString('zh-CN')}</td>
+            <td>{formatTime(decision.created_at, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
             <td><span className={`result-text ${decision.status.toLowerCase()}`}>{statusLabel[decision.status] ?? decision.status}</span></td>
             <td>{regimeLabel[decision.market_regime]}</td>
             <td className="mono">{(Number(decision.portfolio_risk_budget_fraction) * 100).toFixed(0)}%</td>
@@ -69,7 +70,7 @@ export default function PortfolioPage() {
               : [...(allocation.reason_codes ?? []), ...(allocation.risk_flags ?? [])]
             const hasCompiledAction = Boolean(allocation.action)
             return <div className="portfolio-allocation" key={allocation.action_id}><div><strong>{allocation.symbol}</strong><span className={`result-text ${action.toLowerCase()}`}>{hasCompiledAction ? action : 'AI目标'}</span></div><dl><div><dt>方向</dt><dd>{allocation.side ?? allocation.target_side ?? '—'}</dd></div><div><dt>当前 → 目标</dt><dd>{allocation.current_quantity != null ? `${allocation.current_quantity} → ${allocation.target_quantity ?? '—'}` : '尚未编译'}</dd></div><div><dt>风险</dt><dd>{allocation.target_risk_usdt != null ? `${allocation.target_risk_usdt} USDT` : `${((Number(allocation.allocation_fraction ?? 0)) * 100).toFixed(0)}%（待编译）`}</dd></div><div><dt>原因</dt><dd>{reasons.join('、') || allocation.thesis || (hasCompiledAction ? '—' : 'AI 意图已记录，等待确定性风控结果')}</dd></div></dl>{allocation.execution ? <small>执行：{allocation.execution.status} · {allocation.execution.order_ids.join(', ') || '无订单'}</small> : <small>{hasCompiledAction ? '尚无执行记录' : '本轮未生成确定性调仓动作'}</small>}</div>
-          })}</div><small>失效时间：{payload.expires_at} · 提示词：{decision.prompt_version}</small></div></td></tr> : null}
+          })}</div><small>失效时间：{formatTime(payload.expires_at, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })} · 提示词：{decision.prompt_version}</small></div></td></tr> : null}
         </Fragment>
       })}</tbody></table></div>}
     </section>

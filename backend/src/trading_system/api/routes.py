@@ -177,9 +177,13 @@ async def get_config(app_settings: AppSettings, _: CurrentUser) -> dict[str, Any
         "min_net_reward_risk": app_settings.min_net_reward_risk,
         "min_stop_atr": app_settings.min_stop_atr,
         "max_stop_atr": app_settings.max_stop_atr,
+        "trend_adx_min": app_settings.trend_adx_min,
+        "volatility_soft_limit_percentile": app_settings.volatility_soft_limit_percentile,
+        "volatility_hard_limit_percentile": app_settings.volatility_hard_limit_percentile,
+        "elevated_volatility_risk_multiplier": app_settings.elevated_volatility_risk_multiplier,
+        "high_volatility_risk_multiplier": app_settings.high_volatility_risk_multiplier,
         "entry_symbols": app_settings.entry_symbols,
         "model_name": app_settings.active_model_name,
-        "model_daily_request_limit": app_settings.model_daily_request_limit,
         "strategy_profile": app_settings.strategy_profile,
         "portfolio_strategy_enabled": app_settings.portfolio_strategy_enabled,
         "portfolio_rebalance_deadband_fraction": app_settings.portfolio_rebalance_deadband_fraction,
@@ -244,7 +248,6 @@ async def update_model_integration(
         "model_name": payload.model_name,
         "model_reasoning_effort": payload.reasoning_effort,
         "model_timeout_seconds": payload.timeout_seconds,
-        "model_daily_request_limit": payload.daily_request_limit,
         "strategy_profile": payload.strategy_profile,
     }
     await repo.save_runtime_config(updates)
@@ -264,7 +267,6 @@ async def update_model_integration(
         "model_name": app_settings.model_name,
         "reasoning_effort": app_settings.model_reasoning_effort,
         "timeout_seconds": app_settings.model_timeout_seconds,
-        "daily_request_limit": app_settings.model_daily_request_limit,
         "strategy_profile": app_settings.strategy_profile,
         "api_key_configured": bool(app_settings.model_api_key),
     }
@@ -328,6 +330,34 @@ async def update_config(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "minimum stop ATR cannot exceed maximum stop ATR",
         )
+    proposed_soft_vol = updates.get(
+        "volatility_soft_limit_percentile", app_settings.volatility_soft_limit_percentile
+    )
+    proposed_hard_vol = updates.get(
+        "volatility_hard_limit_percentile", app_settings.volatility_hard_limit_percentile
+    )
+    if proposed_soft_vol > proposed_hard_vol:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "volatility soft limit cannot exceed hard limit",
+        )
+    if app_settings.binance_environment == "live":
+        live_caps = {
+            "max_leverage": (3, "live Binance environment caps max_leverage at 3x"),
+            "candidate_count": (5, "live Binance environment caps candidate_count at 5"),
+            "max_positions": (3, "live Binance environment caps max_positions at 3"),
+            "single_trade_risk_pct": (
+                0.0025,
+                "live Binance environment caps single_trade_risk_pct at 0.25%",
+            ),
+            "portfolio_risk_pct": (
+                0.0075,
+                "live Binance environment caps portfolio_risk_pct at 0.75%",
+            ),
+        }
+        for key, (maximum, message) in live_caps.items():
+            if key in updates and updates[key] > maximum:
+                raise HTTPException(status.HTTP_409_CONFLICT, message)
     persisted = {
         key: (
             int(value)
@@ -646,7 +676,9 @@ async def create_replay(
     repo: Repo,
     replays: Replays,
 ) -> dict[str, Any]:
-    parameters = payload.model_dump()
+    # JSON mode turns Decimal replay overrides into strings so the immutable
+    # request snapshot can be safely stored in the JSON column.
+    parameters = payload.model_dump(mode="json")
     replay_id = await replays.create(parameters)
     background_tasks.add_task(replays.run, replay_id, parameters)
     await repo.audit(

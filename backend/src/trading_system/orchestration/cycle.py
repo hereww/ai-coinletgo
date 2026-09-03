@@ -41,7 +41,7 @@ from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.repository import Repository
 from trading_system.risk.engine import RiskEngine
 from trading_system.risk.portfolio import PortfolioCompiler
-from trading_system.strategy.indicators import pearson_correlation
+from trading_system.strategy.indicators import atr, pearson_correlation
 from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import build_snapshot
 
@@ -88,6 +88,9 @@ class TradingCycle:
             min_book_depth_usdt=Decimal(str(settings.min_book_depth_usdt)),
             min_listing_days=settings.min_listing_days,
             entry_trigger=settings.entry_trigger,
+            trend_adx_min=Decimal(str(settings.trend_adx_min)),
+            volatility_soft_limit_percentile=Decimal(str(settings.volatility_soft_limit_percentile)),
+            volatility_hard_limit_percentile=Decimal(str(settings.volatility_hard_limit_percentile)),
         )
         self.risk = RiskEngine()
         self.portfolio = PortfolioCompiler()
@@ -280,6 +283,13 @@ class TradingCycle:
     async def _run_locked(self, result: CycleResult) -> CycleResult:
         await self.repository.apply_runtime_config(self.settings)
         self.screener.entry_trigger = self.settings.entry_trigger
+        self.screener.trend_adx_min = Decimal(str(self.settings.trend_adx_min))
+        self.screener.volatility_soft_limit_percentile = Decimal(
+            str(self.settings.volatility_soft_limit_percentile)
+        )
+        self.screener.volatility_hard_limit_percentile = Decimal(
+            str(self.settings.volatility_hard_limit_percentile)
+        )
         logger.info(
             "cycle runtime config interval_minutes=%d entry_trigger=%s candidate_count=%d",
             self.settings.scan_interval_minutes,
@@ -403,7 +413,9 @@ class TradingCycle:
             # simultaneous trend and 15m trigger.  Those features remain in the
             # model input and malformed/unsafe targets are still rejected by the
             # deterministic compiler.  Signal-v1 keeps its strict screener.
-            candidates = self.screener.rank_portfolio(snapshots)
+            candidates = self.screener.rank_portfolio(
+                snapshots, limit=self.settings.candidate_count
+            )
         result.candidates = len(candidates)
         logger.info(
             "cycle candidates count=%d symbols=%s",
@@ -411,14 +423,20 @@ class TradingCycle:
             [item.symbol for item in candidates],
         )
         if not candidates and not (self.settings.portfolio_strategy_enabled and positions):
-            result.detail = "本轮没有通过确定性筛选的候选合约，跳过模型请求并保留下一轮15分钟周期。"
+            result.detail = (
+                "本轮没有通过确定性筛选的候选合约，"
+                "跳过模型请求并等待下一轮配置扫描周期。"
+            )
             logger.info("cycle skipped model request because deterministic candidates are empty")
             return result
         if not self.model.configured:
             result.detail = "model relay not configured; no new decisions"
             return result
         if not await self._model_cadence_available():
-            result.detail = "模型15分钟节流门禁仍在生效，本轮完成行情检查但跳过重复模型请求。"
+            result.detail = (
+                "模型当前扫描周期的去重门禁仍在生效，"
+                "本轮完成行情检查但跳过重复模型请求。"
+            )
             logger.info("cycle skipped model request because local cadence window is active")
             return result
 
@@ -599,8 +617,8 @@ class TradingCycle:
             return "模型服务响应超时，本轮未生成组合决策；现有仓位保护继续有效。"
         if "schema contract" in detail or "validation" in detail:
             return "模型输出格式未通过本地校验，本轮未生成组合决策；现有仓位保护继续有效。"
-        if "budget" in detail or "throttl" in detail:
-            return "模型请求额度或节流门禁生效，本轮未生成组合决策；现有仓位保护继续有效。"
+        if "throttl" in detail or "rate limit" in detail or "too frequent" in detail:
+            return "模型请求频率门禁生效，本轮未生成组合决策；现有仓位保护继续有效。"
         if "not configured" in detail or "https model endpoint" in detail:
             return "模型服务未正确配置，本轮未生成组合决策；现有仓位保护继续有效。"
         return "模型服务暂不可用，本轮未生成组合决策；现有仓位保护继续有效。"
@@ -1279,6 +1297,18 @@ class TradingCycle:
                     self._log_snapshot_failures(symbol, failures)
                     return None, failures
 
+                atr_15m = atr(candles_15m)
+                if atr_15m <= 0:
+                    failure = self._snapshot_failure(
+                        symbol,
+                        stage="build_snapshot",
+                        reason_code="ATR_ZERO",
+                        reason_zh="15分钟 ATR 为零，无法计算有效止损距离",
+                        extra={"atr_15m": str(atr_15m), "candle_count": len(candles_15m)},
+                    )
+                    self._log_snapshot_failures(symbol, [failure])
+                    return None, [failure]
+
                 key = f"open-interest:{symbol}"
                 try:
                     previous_raw = await self.redis.get(key)
@@ -1303,6 +1333,19 @@ class TradingCycle:
                         open_interest,
                         previous,
                         book_depth,
+                        trend_adx_min=Decimal(str(self.settings.trend_adx_min)),
+                        volatility_soft_limit_percentile=Decimal(
+                            str(self.settings.volatility_soft_limit_percentile)
+                        ),
+                        volatility_hard_limit_percentile=Decimal(
+                            str(self.settings.volatility_hard_limit_percentile)
+                        ),
+                        elevated_volatility_risk_multiplier=Decimal(
+                            str(self.settings.elevated_volatility_risk_multiplier)
+                        ),
+                        high_volatility_risk_multiplier=Decimal(
+                            str(self.settings.high_volatility_risk_multiplier)
+                        ),
                     )
                 except Exception as error:
                     failure = self._snapshot_failure(
@@ -1419,14 +1462,14 @@ class TradingCycle:
 
     async def _mark_model_cadence(self) -> None:
         key = "trading-cycle:model-last-slot"
-        window = max(15, int(self.settings.scan_interval_minutes)) * 60
+        window = max(5, int(self.settings.scan_interval_minutes)) * 60
         try:
             await self.redis.set(key, str(self._model_cadence_slot()), ex=window * 2)
         except Exception:
             logger.exception("model cadence state write failed")
 
     def _model_cadence_slot(self) -> int:
-        window = max(15, int(self.settings.scan_interval_minutes)) * 60
+        window = max(5, int(self.settings.scan_interval_minutes)) * 60
         # Keep the five-second post-boundary grace period in the same slot as
         # the scheduled cycle, so a manual request cannot consume that cycle.
         return int((datetime.now(UTC).timestamp() - 5) // window)
@@ -1551,7 +1594,7 @@ class TradingCycle:
         step = filters.market_step_size or filters.step_size
         minimum = filters.market_min_quantity or filters.min_quantity
         quantity = min(requested, position.quantity)
-        rounded = (quantity // step) * step
+        rounded = (quantity / step).to_integral_value(rounding="ROUND_DOWN") * step
         if rounded < minimum or rounded <= 0:
             raise ExchangeError(
                 f"model partial close quantity {requested} rounds below exchange minimum"
@@ -1575,6 +1618,20 @@ class TradingCycle:
             min_confidence=Decimal(str(self.settings.min_confidence)),
             min_net_reward_risk=Decimal(str(self.settings.min_net_reward_risk)),
             entry_direction=self.settings.entry_direction,
+            entry_trigger=self.settings.entry_trigger,
+            trend_adx_min=Decimal(str(self.settings.trend_adx_min)),
+            volatility_soft_limit_percentile=Decimal(
+                str(self.settings.volatility_soft_limit_percentile)
+            ),
+            volatility_hard_limit_percentile=Decimal(
+                str(self.settings.volatility_hard_limit_percentile)
+            ),
+            elevated_volatility_risk_multiplier=Decimal(
+                str(self.settings.elevated_volatility_risk_multiplier)
+            ),
+            high_volatility_risk_multiplier=Decimal(
+                str(self.settings.high_volatility_risk_multiplier)
+            ),
             portfolio_rebalance_deadband_fraction=Decimal(
                 str(self.settings.portfolio_rebalance_deadband_fraction)
             ),
@@ -1608,7 +1665,7 @@ class TradingCycle:
         return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
     @staticmethod
-    def _next_cycle_boundary(interval_minutes: int = 15) -> datetime:
+    def _next_cycle_boundary(interval_minutes: int = 5) -> datetime:
         now = datetime.now(UTC)
         interval_seconds = interval_minutes * 60
         next_timestamp = (int(now.timestamp()) // interval_seconds + 1) * interval_seconds

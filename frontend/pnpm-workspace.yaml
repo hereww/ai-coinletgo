@@ -2,3 +2,10 @@ allowBuilds:
   esbuild: true
 onlyBuiltDependencies:
   - esbuild
+supportedArchitectures:
+  os:
+    - darwin
+    - linux
+  cpu:
+    - arm64
+    - x64

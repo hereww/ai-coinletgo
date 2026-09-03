@@ -49,6 +49,12 @@ REASON_LABELS_ZH: dict[str, str] = {
     "basis_abnormal": "基差异常",
     "insufficient_book_depth": "盘口深度不足",
     "extreme_volatility": "波动率过高",
+    "volatile_regime": "市场处于极端波动状态",
+    "uncertain_regime": "市场状态不确定",
+    "market_regime_not_trending": "当前不是可开仓的趋势市场",
+    "trend_strength_below_minimum": "ADX低于最低趋势强度",
+    "invalid_volatility_risk_multiplier": "波动率风险系数无效",
+    "atr_invalid": "ATR无效，无法计算止损距离",
     "trend_not_aligned": "1小时与4小时趋势未对齐",
     "no_aligned_entry_trigger": "没有符合策略的入场触发",
     "model_returned_no_trade": "模型判断暂不交易",
@@ -373,6 +379,9 @@ def _market_context_payload(snapshot: MarketSnapshot) -> dict[str, object]:
             "breakout_15m",
             "pullback_15m",
             "volume_zscore",
+            "market_regime",
+            "volatility_percentile",
+            "volatility_risk_multiplier",
         },
     )
 
@@ -457,9 +466,17 @@ class Repository:
         async with self.database.sessions() as session:
             record = await session.get(RuntimeConfigRecord, 1)
             values = dict(record.values) if record is not None else {}
-        for key, value in values.items():
-            if key in RUNTIME_CONFIG_FIELDS:
-                setattr(settings, key, value)
+        updates = {key: value for key, value in values.items() if key in RUNTIME_CONFIG_FIELDS}
+        if not updates:
+            return values
+        # Runtime settings are persisted as JSON and normally bypass Pydantic's
+        # constructor.  Re-validate the merged object so a stale testnet-only
+        # aggressive setting cannot silently leak into live mode after a restart.
+        validated = type(settings).model_validate(
+            {**settings.model_dump(), **updates}
+        )
+        for key in updates:
+            setattr(settings, key, getattr(validated, key))
         return values
 
     async def save_runtime_config(self, updates: Mapping[str, object]) -> dict[str, object]:
@@ -1031,10 +1048,36 @@ class Repository:
 
     async def list_signals(self, limit: int = 200) -> list[dict[str, Any]]:
         async with self.database.sessions() as session:
-            result = await session.execute(
-                select(SignalRecord).order_by(desc(SignalRecord.created_at)).limit(limit)
-            )
+            result = await session.execute(select(SignalRecord))
             signal_records = list(result.scalars())
+            signal_rows: list[tuple[SignalRecord, str | datetime, datetime]] = []
+            for record in signal_records:
+                payload = dict(record.payload)
+                persisted_time = record.created_at
+                if persisted_time.tzinfo is None:
+                    persisted_time = persisted_time.replace(tzinfo=UTC)
+                signal_created_at: str | datetime = record.created_at
+                sort_time = persisted_time
+                raw_signal_time = payload.get("created_at")
+                if isinstance(raw_signal_time, str) and raw_signal_time.strip():
+                    try:
+                        parsed_signal_time = datetime.fromisoformat(
+                            raw_signal_time.replace("Z", "+00:00")
+                        )
+                        if parsed_signal_time.tzinfo is None:
+                            parsed_signal_time = parsed_signal_time.replace(tzinfo=UTC)
+                        if abs(parsed_signal_time - persisted_time) <= timedelta(hours=2):
+                            signal_created_at = raw_signal_time
+                            sort_time = parsed_signal_time
+                    except ValueError:
+                        pass
+                signal_rows.append((record, signal_created_at, sort_time))
+            # Persistence can lag the model response, so database insertion
+            # order is not reliable for the legacy timeline. Sort by the
+            # effective signal-generation time before applying the API limit.
+            signal_rows.sort(key=lambda item: item[2], reverse=True)
+            signal_rows = signal_rows[:limit]
+            signal_records = [item[0] for item in signal_rows]
             signal_ids = [record.id for record in signal_records]
             risk_by_signal: dict[str, RiskDecisionRecord | None] = {}
             if signal_ids:
@@ -1046,7 +1089,7 @@ class Repository:
                 for risk_record in risk_result.scalars():
                     risk_by_signal.setdefault(risk_record.signal_id, risk_record)
             rows: list[dict[str, Any]] = []
-            for record in signal_records:
+            for record, signal_created_at, _ in signal_rows:
                 payload = dict(record.payload)
                 raw_codes = _raw_reason_codes(record.payload)
                 reason_codes_zh = _reason_codes_zh(record.payload, REASON_LABELS_ZH)
@@ -1104,7 +1147,7 @@ class Repository:
                         if isinstance(payload.get("market_context"), dict)
                         else None,
                         "risk_decision": risk_decision,
-                        "created_at": record.created_at,
+                        "created_at": signal_created_at,
                     }
                 )
             return rows

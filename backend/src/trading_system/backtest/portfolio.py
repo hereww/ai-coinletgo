@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal, cast
 
 from trading_system.backtest.engine import (
     BacktestConfig,
@@ -65,6 +66,7 @@ class PortfolioBacktestEngine(BacktestEngine):
         funding_rates: dict[str, dict[datetime, Decimal]] | None = None,
     ) -> BacktestResult:
         config = config or BacktestConfig()
+        self._active_config = config
         self._validate_inputs(markets, filters)
         funding_rates = funding_rates or {}
         candle_maps = {
@@ -192,6 +194,7 @@ class PortfolioBacktestEngine(BacktestEngine):
                     pending,
                     ledgers,
                     config,
+                    funding_rates,
                 )
             evaluation_index += 1
 
@@ -297,13 +300,27 @@ class PortfolioBacktestEngine(BacktestEngine):
         pending: dict[str, PendingSignal],
         ledgers: dict[str, SymbolLedger],
         config: BacktestConfig,
+        funding_rates: dict[str, dict[datetime, Decimal]] | None = None,
     ) -> dict[str, MarketSnapshot]:
+        funding_rates = funding_rates or {}
         snapshots: list[MarketSnapshot] = []
         for symbol, history in histories.items():
             if len(history) < self.minimum_history_bars:
                 continue
-            snapshots.append(self._portfolio_snapshot(symbol, history, config))
+            snapshot = self._portfolio_snapshot(symbol, history, config)
+            historical_rate = self._funding_rate_at(
+                funding_rates.get(symbol),
+                history[-1].close_time,
+                config.estimated_funding_rate,
+            )
+            # Keep subclass/test seams compatible with the original
+            # three-argument snapshot hook while still injecting the
+            # historical funding rate into the resulting immutable snapshot.
+            if historical_rate != snapshot.funding_rate:
+                snapshot = snapshot.model_copy(update={"funding_rate": historical_rate})
+            snapshots.append(snapshot)
         snapshot_map = {snapshot.symbol: snapshot for snapshot in snapshots}
+        self._rank_config = config
         candidates = self._rank_candidates(snapshots, ledgers, config.candidate_count)
         for snapshot in candidates:
             symbol = snapshot.symbol
@@ -326,21 +343,50 @@ class PortfolioBacktestEngine(BacktestEngine):
         snapshots: list[MarketSnapshot],
         ledgers: dict[str, SymbolLedger],
         limit: int,
+        *,
+        config: BacktestConfig | None = None,
     ) -> list[MarketSnapshot]:
         eligible: list[MarketSnapshot] = []
+        resolved_config = config
+        if resolved_config is None:
+            candidate_config = getattr(self, "_rank_config", None)
+            resolved_config = (
+                candidate_config
+                if isinstance(candidate_config, BacktestConfig)
+                else BacktestConfig()
+            )
+        screener = MarketScreener(
+            max_spread_pct=resolved_config.max_spread_pct,
+            max_abs_funding_rate=resolved_config.max_abs_funding_rate,
+            max_abs_basis_pct=resolved_config.max_abs_basis_pct,
+            min_book_depth_usdt=resolved_config.min_book_depth_usdt,
+            min_listing_days=resolved_config.min_listing_days,
+            max_volatility_percentile=resolved_config.max_volatility_percentile,
+            entry_trigger=cast(
+                Literal["breakout_or_pullback", "breakout_only", "pullback_only"],
+                resolved_config.entry_trigger,
+            ),
+            trend_adx_min=resolved_config.trend_adx_min,
+            volatility_soft_limit_percentile=resolved_config.volatility_soft_limit_percentile,
+            volatility_hard_limit_percentile=resolved_config.volatility_hard_limit_percentile,
+        )
         for snapshot in snapshots:
-            accepted, reasons = self.screener.eligible(snapshot)
+            accepted, reasons = screener.eligible(snapshot)
             if not accepted:
                 for reason in reasons:
                     ledgers[snapshot.symbol].rejections[reason] += 1
                 continue
-            snapshot.score = self.screener.score(snapshot)
+            snapshot.score = screener.score(snapshot)
             eligible.append(snapshot)
         return sorted(eligible, key=lambda item: item.score, reverse=True)[:limit]
 
     @staticmethod
     def _portfolio_snapshot(
-        symbol: str, history: list[Candle], config: BacktestConfig
+        symbol: str,
+        history: list[Candle],
+        config: BacktestConfig,
+        *,
+        funding_rate: Decimal | None = None,
     ) -> MarketSnapshot:
         price = history[-1].close
         universe = UniverseSymbol(
@@ -352,7 +398,11 @@ class PortfolioBacktestEngine(BacktestEngine):
             best_ask=price * Decimal("1.0001"),
             mark_price=price,
             index_price=price,
-            funding_rate=config.estimated_funding_rate,
+            funding_rate=(
+                config.estimated_funding_rate
+                if funding_rate is None
+                else funding_rate
+            ),
         )
         return build_snapshot(
             universe,
@@ -361,7 +411,26 @@ class PortfolioBacktestEngine(BacktestEngine):
             aggregate_candles(history[-1920:], 16),
             Decimal("1000000"),
             book_depth_usdt=Decimal("1000000"),
+            trend_adx_min=config.trend_adx_min,
+            volatility_soft_limit_percentile=config.volatility_soft_limit_percentile,
+            volatility_hard_limit_percentile=config.volatility_hard_limit_percentile,
+            elevated_volatility_risk_multiplier=config.elevated_volatility_risk_multiplier,
+            high_volatility_risk_multiplier=config.high_volatility_risk_multiplier,
         )
+
+    @staticmethod
+    def _funding_rate_at(
+        rates: dict[datetime, Decimal] | None,
+        timestamp: datetime,
+        fallback: Decimal,
+    ) -> Decimal:
+        """Use the latest known historical funding rate at snapshot time."""
+        if not rates:
+            return fallback
+        eligible = [event_time for event_time in rates if event_time <= timestamp]
+        if not eligible:
+            return fallback
+        return rates[max(eligible)]
 
     @staticmethod
     def _trade_signal(
@@ -475,8 +544,22 @@ class PortfolioBacktestEngine(BacktestEngine):
             max_positions=config.max_positions,
             max_same_direction=config.max_same_direction,
             correlation_limit=config.correlation_limit,
-            min_stop_atr=config.stop_atr,
-            max_stop_atr=config.stop_atr,
+            min_stop_atr=config.min_stop_atr,
+            max_stop_atr=config.max_stop_atr,
+            min_confidence=config.min_confidence,
+            min_net_reward_risk=config.min_net_reward_risk,
+            entry_direction=cast(
+                Literal["both", "long_only", "short_only"], config.entry_direction
+            ),
+            entry_trigger=cast(
+                Literal["breakout_or_pullback", "breakout_only", "pullback_only"],
+                config.entry_trigger,
+            ),
+            trend_adx_min=config.trend_adx_min,
+            volatility_soft_limit_percentile=config.volatility_soft_limit_percentile,
+            volatility_hard_limit_percentile=config.volatility_hard_limit_percentile,
+            elevated_volatility_risk_multiplier=config.elevated_volatility_risk_multiplier,
+            high_volatility_risk_multiplier=config.high_volatility_risk_multiplier,
         )
 
     @staticmethod

@@ -96,6 +96,21 @@ class ForcedPortfolioEngine(PortfolioBacktestEngine):
     def _signal(history: list[Candle]) -> PositionSide | None:
         return PositionSide.LONG
 
+    @staticmethod
+    def _portfolio_snapshot(
+        symbol: str, history: list[Candle], config: BacktestConfig
+    ) -> MarketSnapshot:
+        return PortfolioBacktestEngine._portfolio_snapshot(symbol, history, config).model_copy(
+            update={
+                "market_regime": "TRENDING",
+                "volatility_risk_multiplier": Decimal("1"),
+                "adx_1h": Decimal("30"),
+                "trend_1h": 1,
+                "trend_4h": 1,
+                "breakout_15m": 1,
+            }
+        )
+
     def _rank_candidates(
         self,
         snapshots: list[MarketSnapshot],
@@ -222,3 +237,23 @@ def test_portfolio_funding_cost_respects_position_direction() -> None:
     )
     assert long_cost > 0
     assert short_cost == -long_cost
+
+
+def test_portfolio_snapshot_uses_latest_historical_funding_rate() -> None:
+    rows = flat_candles()
+    config = portfolio_config(estimated_funding_rate=Decimal("0.0001"))
+    snapshot = PortfolioBacktestEngine._portfolio_snapshot(
+        "BTCUSDT",
+        rows,
+        config,
+        funding_rate=Decimal("-0.0007"),
+    )
+    assert snapshot.funding_rate == Decimal("-0.0007")
+    assert PortfolioBacktestEngine._funding_rate_at(
+        {
+            rows[-10].close_time: Decimal("0.0002"),
+            rows[-1].close_time: Decimal("-0.0007"),
+        },
+        rows[-1].close_time,
+        Decimal("0.0001"),
+    ) == Decimal("-0.0007")

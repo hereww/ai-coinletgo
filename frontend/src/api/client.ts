@@ -15,6 +15,99 @@ export class ApiError extends Error {
   }
 }
 
+const FIELD_LABELS: Record<string, string> = {
+  capital_limit_usdt: '资金上限',
+  single_trade_risk_pct: '单笔风险',
+  portfolio_risk_pct: '组合风险',
+  daily_loss_pct: '日亏损熔断',
+  max_drawdown_pct: '总回撤熔断',
+  max_leverage: '最高杠杆',
+  max_margin_pct: '保证金上限',
+  max_positions: '最多仓位',
+  max_same_direction: '同向最多仓位',
+  correlation_limit: '相关性阈值',
+  candidate_count: '候选合约数量',
+  scan_interval_minutes: '扫描周期',
+  min_confidence: '最低置信度',
+  min_net_reward_risk: '最低净盈亏比',
+  min_stop_atr: '最小止损距离',
+  max_stop_atr: '最大止损距离',
+  trend_adx_min: '最低趋势强度',
+  volatility_soft_limit_percentile: '高波动分位',
+  volatility_hard_limit_percentile: '极端波动分位',
+  elevated_volatility_risk_multiplier: '高波动风险系数',
+  high_volatility_risk_multiplier: '极端波动风险系数',
+  entry_symbols: '允许开仓代币',
+  entry_direction: '允许开仓方向',
+  entry_trigger: '入场触发',
+  password: '操作密码',
+}
+
+const MESSAGE_TRANSLATIONS: Record<string, string> = {
+  'minimum stop ATR cannot exceed maximum stop ATR': '最小止损距离不能大于最大止损距离',
+  'volatility soft limit cannot exceed hard limit': '高波动分位不能大于极端波动分位',
+  'Password verification failed': '操作密码验证失败',
+  'Authentication required': '需要登录后才能执行此操作',
+  'Session expired': '登录已过期，请重新登录',
+}
+
+function translateApiMessage(message: string): string {
+  return MESSAGE_TRANSLATIONS[message] ?? message
+}
+
+function validationFieldName(loc: unknown): string | undefined {
+  if (!Array.isArray(loc)) return undefined
+  const field = [...loc].reverse().find((item): item is string => (
+    typeof item === 'string' && item !== 'body' && item !== 'query' && item !== 'path'
+  ))
+  return field ? FIELD_LABELS[field] ?? field : undefined
+}
+
+function formatValidationError(value: Record<string, unknown>): string {
+  const message = typeof value.msg === 'string' ? value.msg : ''
+  const field = validationFieldName(value.loc)
+  if (!message) return formatApiErrorDetail(value)
+  if (!field) return translateApiMessage(message)
+
+  const max = message.match(/less than or equal to ([^ ]+)/i)?.[1]
+  if (max) return `${field}不能大于 ${max}`
+  const min = message.match(/greater than or equal to ([^ ]+)/i)?.[1]
+  if (min) return `${field}不能小于 ${min}`
+  const greater = message.match(/greater than ([^ ]+)/i)?.[1]
+  if (greater) return `${field}必须大于 ${greater}`
+  const less = message.match(/less than ([^ ]+)/i)?.[1]
+  if (less) return `${field}必须小于 ${less}`
+  if (/valid|validation/i.test(message)) return `${field}格式无效`
+  return `${field}：${translateApiMessage(message)}`
+}
+
+/** Convert FastAPI/Pydantic errors into text that can be shown in the UI. */
+export function formatApiErrorDetail(detail: unknown): string {
+  if (detail == null) return '请求失败'
+  if (typeof detail === 'string') return translateApiMessage(detail)
+  if (typeof detail === 'number' || typeof detail === 'boolean') return String(detail)
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => formatApiErrorDetail(item))
+      .filter((item) => item && item !== '请求失败')
+    return messages.length ? messages.join('；') : '请求失败'
+  }
+  if (typeof detail === 'object') {
+    const value = detail as Record<string, unknown>
+    if (value.detail !== undefined) return formatApiErrorDetail(value.detail)
+    if (Array.isArray(value)) return formatApiErrorDetail(value)
+    if (typeof value.msg === 'string') return formatValidationError(value)
+    if (value.reason !== undefined) return formatApiErrorDetail(value.reason)
+    if (value.message !== undefined) return formatApiErrorDetail(value.message)
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return '请求失败'
+    }
+  }
+  return String(detail)
+}
+
 function readCookie(name: string): string | undefined {
   const prefix = `${name}=`
   return document.cookie
@@ -37,8 +130,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError('无法连接控制台 API，请检查服务器地址、HTTPS 证书或网络连接', endpoint)
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: '请求失败' }))
-    const error = new ApiError(body.detail ?? `HTTP ${response.status}`, endpoint, response.status)
+    const body: unknown = await response.json().catch(() => ({ detail: '请求失败' }))
+    const detail = (
+      body && typeof body === 'object' && 'detail' in body
+        ? (body as { detail?: unknown }).detail
+        : body
+    ) ?? `HTTP ${response.status}`
+    const error = new ApiError(formatApiErrorDetail(detail), endpoint, response.status)
     if (response.status === 401 && !path.endsWith('/auth/me') && !path.endsWith('/auth/login')) {
       window.dispatchEvent(new CustomEvent('frc:unauthorized'))
     }
@@ -75,7 +173,6 @@ export const api = {
     model_name: string
     reasoning_effort: IntegrationStatus['model']['reasoning_effort']
     timeout_seconds: number
-    daily_request_limit: number
     strategy_profile: IntegrationStatus['model']['strategy_profile']
   }) => request('/api/v1/integrations/model', {
     method: 'PATCH',
@@ -86,8 +183,17 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ profile_id: profileId }),
     }),
-  updateConfig: (payload: Partial<RiskConfig> & { password: string }) =>
-    request<RiskConfig>('/api/v1/config', { method: 'PATCH', body: JSON.stringify(payload) }),
+  updateConfig: (payload: Partial<RiskConfig> & { password: string }) => {
+    // GET /config includes display-only model metadata. The PATCH schema
+    // deliberately forbids unknown fields, so never echo those values back.
+    const updates = { ...payload }
+    delete updates.model_name
+    delete updates.strategy_profile
+    return request<RiskConfig>('/api/v1/config', {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    })
+  },
   pause: () => request<{ mode: string }>('/api/v1/actions/pause', { method: 'POST' }),
   runCycle: (password: string) => request<{ status: string; operation_id: string }>('/api/v1/actions/run-cycle', {
     method: 'POST',
@@ -139,6 +245,41 @@ export const api = {
     start_date?: string
     end_date?: string
     portfolio_decision_id?: string
+    backtest_config?: Partial<{
+      initial_equity: string
+      risk_pct: string
+      stop_atr: string
+      trailing_atr: string
+      fee_rate: string
+      slippage_rate: string
+      estimated_funding_rate: string
+      daily_loss_pct: string
+      max_drawdown_pct: string
+      portfolio_risk_pct: string
+      max_leverage: number
+      max_margin_pct: string
+      max_positions: number
+      max_same_direction: number
+      correlation_limit: string
+      candidate_count: number
+      max_spread_pct: string
+      max_abs_funding_rate: string
+      max_abs_basis_pct: string
+      min_book_depth_usdt: string
+      min_listing_days: number
+      max_volatility_percentile: string
+      entry_direction: 'both' | 'long_only' | 'short_only'
+      entry_trigger: 'breakout_or_pullback' | 'breakout_only' | 'pullback_only'
+      min_confidence: string
+      min_net_reward_risk: string
+      min_stop_atr: string
+      max_stop_atr: string
+      trend_adx_min: string
+      volatility_soft_limit_percentile: string
+      volatility_hard_limit_percentile: string
+      elevated_volatility_risk_multiplier: string
+      high_volatility_risk_multiplier: string
+    }>
   }) =>
     request<{ id: string; status: string }>('/api/v1/replays', {
       method: 'POST',

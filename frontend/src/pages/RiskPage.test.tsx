@@ -24,20 +24,21 @@ const config = {
   entry_direction: 'both',
   entry_trigger: 'breakout_or_pullback',
   candidate_count: 5,
-  scan_interval_minutes: 15,
+  scan_interval_minutes: 5,
   min_confidence: 0.75,
   min_net_reward_risk: 2,
   min_stop_atr: 0.8,
   max_stop_atr: 2.5,
   entry_symbols: [],
   model_name: 'gpt-5.6',
-  model_daily_request_limit: 110,
 }
 
 it('confirms editable risk settings with the operator password', async () => {
   apiMock.config.mockResolvedValue(config)
   apiMock.updateConfig.mockResolvedValue({ ...config, capital_limit_usdt: 900 })
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const invalidateQueries = vi.spyOn(queryClient, 'invalidateQueries')
+  render(<QueryClientProvider client={queryClient}><RiskPage /></QueryClientProvider>)
   fireEvent.change(await screen.findByLabelText('资金上限 (USDT)'), { target: { value: '900' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   expect(await screen.findByRole('dialog', { name: '确认保存开仓策略' })).toBeInTheDocument()
@@ -45,6 +46,7 @@ it('confirms editable risk settings with the operator password', async () => {
   fireEvent.click(screen.getByRole('button', { name: '确认保存' }))
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ capital_limit_usdt: 900, password: 'operator-password' })))
   expect(apiMock.updateConfig.mock.calls[0][0]).not.toHaveProperty('confirmation')
+  expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['dashboard'] })
 })
 
 it('allows the configured leverage ceiling to be raised to 30x', async () => {
@@ -58,12 +60,12 @@ it('allows the configured leverage ceiling to be raised to 30x', async () => {
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ max_leverage: 30 })))
 })
 
-it('allows the scan interval to be configured from 15 to 120 minutes', async () => {
+it('allows the scan interval to be configured from 5 to 120 minutes', async () => {
   apiMock.config.mockResolvedValue(config)
   apiMock.updateConfig.mockResolvedValue({ ...config, scan_interval_minutes: 30 })
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
   const interval = await screen.findByLabelText('扫描周期（分钟）')
-  expect(interval).toHaveAttribute('min', '15')
+  expect(interval).toHaveAttribute('min', '5')
   expect(interval).toHaveAttribute('max', '120')
   fireEvent.change(interval, { target: { value: '30' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
@@ -132,4 +134,17 @@ it('blocks saving when the minimum stop exceeds the maximum stop', async () => {
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('最小止损距离不能大于最大止损距离')
   expect(apiMock.updateConfig).not.toHaveBeenCalled()
+})
+
+it('shows a readable API validation error in the confirmation dialog', async () => {
+  apiMock.config.mockResolvedValue(config)
+  apiMock.updateConfig.mockRejectedValue(new Error('最高杠杆不能大于 30；扫描周期不能小于 15'))
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
+
+  fireEvent.click(await screen.findByRole('button', { name: '保存配置' }))
+  fireEvent.change(await screen.findByLabelText('操作密码'), { target: { value: 'operator-password' } })
+  fireEvent.click(screen.getByRole('button', { name: '确认保存' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('最高杠杆不能大于 30；扫描周期不能小于 15')
+  expect(screen.queryByText('[object Object]')).not.toBeInTheDocument()
 })

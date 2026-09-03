@@ -454,6 +454,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
         now_ms = int(time.time() * 1000)
         rows: list[UniverseSymbol] = []
         for symbol_info in exchange_info["symbols"]:
+            if not isinstance(symbol_info, dict):
+                continue
             symbol = symbol_info["symbol"]
             if (
                 # Testnet occasionally exposes non-standard placeholder symbols.
@@ -477,23 +479,65 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 continue
             book = book_map[symbol]
             premium = premium_map[symbol]
-            if Decimal(book["bidPrice"]) <= 0 or Decimal(book["askPrice"]) <= 0:
-                continue
-            rows.append(
-                UniverseSymbol(
-                    symbol=symbol,
-                    status=symbol_info["status"],
-                    listing_days=max(
-                        0, (now_ms - int(symbol_info.get("onboardDate", now_ms))) // 86_400_000
-                    ),
-                    quote_volume_24h=Decimal(ticker_map[symbol]["quoteVolume"]),
-                    best_bid=Decimal(book["bidPrice"]),
-                    best_ask=Decimal(book["askPrice"]),
-                    mark_price=Decimal(premium["markPrice"]),
-                    index_price=Decimal(premium["indexPrice"]),
-                    funding_rate=Decimal(premium["lastFundingRate"]),
+            try:
+                bid = Decimal(str(book["bidPrice"]))
+                ask = Decimal(str(book["askPrice"]))
+                quote_volume = Decimal(str(ticker_map[symbol]["quoteVolume"]))
+                mark_price = Decimal(str(premium["markPrice"]))
+                index_price = Decimal(str(premium["indexPrice"]))
+                funding_rate = Decimal(str(premium["lastFundingRate"]))
+                listing_days = max(
+                    0,
+                    (now_ms - int(symbol_info.get("onboardDate", now_ms)))
+                    // 86_400_000,
                 )
-            )
+                # A crossed/inverted book or non-finite numeric value is a
+                # transient exchange-data race, not a valid zero/negative
+                # spread.  Reject only this row so one bad symbol cannot
+                # abort the complete universe refresh.
+                numeric_values = (
+                    bid,
+                    ask,
+                    quote_volume,
+                    mark_price,
+                    index_price,
+                    funding_rate,
+                )
+                if (
+                    any(not value.is_finite() for value in numeric_values)
+                    or bid <= 0
+                    or ask <= 0
+                    or bid > ask
+                    or quote_volume < 0
+                    or mark_price <= 0
+                    or index_price <= 0
+                ):
+                    logger.warning(
+                        "skipping invalid Binance universe row "
+                        "symbol=%s reason=invalid_numeric_book",
+                        symbol,
+                    )
+                    continue
+                rows.append(
+                    UniverseSymbol(
+                        symbol=symbol,
+                        status=symbol_info["status"],
+                        listing_days=listing_days,
+                        quote_volume_24h=quote_volume,
+                        best_bid=bid,
+                        best_ask=ask,
+                        mark_price=mark_price,
+                        index_price=index_price,
+                        funding_rate=funding_rate,
+                    )
+                )
+            except (ArithmeticError, KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    "skipping malformed Binance universe row symbol=%s error=%s",
+                    symbol,
+                    type(error).__name__,
+                )
+                continue
         rows.sort(key=lambda item: item.quote_volume_24h, reverse=True)
         return rows if limit <= 0 else rows[:limit]
 

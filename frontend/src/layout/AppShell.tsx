@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
+import { APP_TIME_ZONE } from '../features/signals/signalPresentation'
 
 const navItems = [
   { to: '/', label: '总览', icon: Gauge },
@@ -54,7 +55,7 @@ export function AppShell({ children, user, environment, healthReady }: { childre
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [mobileOpen])
-  const beijingTime = useMemo(() => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now), [now])
+  const beijingTime = useMemo(() => new Intl.DateTimeFormat('zh-CN', { timeZone: APP_TIME_ZONE, hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now), [now])
   const healthClass = healthReady === true ? 'healthy' : healthReady === false ? 'warning' : 'unknown'
   const healthLabel = healthReady === true ? '门禁正常' : healthReady === false ? '门禁未通过' : '门禁检查中'
 

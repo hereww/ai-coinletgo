@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import cast
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from trading_system.backtest.engine import BacktestConfig, BacktestResult
 from trading_system.backtest.portfolio import PortfolioBacktestEngine
+from trading_system.config import Settings
 from trading_system.domain.enums import SystemMode
 from trading_system.domain.models import (
     AccountState,
@@ -39,15 +41,30 @@ class ReplayService:
         repository: Repository,
         exchange: BinanceUSDMarketClient,
         notifier: TelegramNotifier,
+        settings: Settings | None = None,
     ) -> None:
         self.repository = repository
         self.exchange = exchange
         self.notifier = notifier
+        self.settings = settings
         self.engine = PortfolioBacktestEngine()
         self.portfolio_compiler = PortfolioCompiler()
 
     async def create(self, parameters: dict[str, object]) -> str:
+        # Persist a complete config snapshot with the queued replay.  A replay
+        # must keep its meaning even if the operator changes live settings
+        # while the historical job is waiting in the background queue.
+        prepared = self.prepare_parameters(parameters)
+        parameters.clear()
+        parameters.update(prepared)
         return await self.repository.create_replay(parameters)
+
+    def prepare_parameters(self, parameters: dict[str, object]) -> dict[str, object]:
+        prepared = dict(parameters)
+        if str(prepared.get("mode", "deterministic")) == "deterministic":
+            config = self._backtest_config(prepared)
+            prepared["backtest_config"] = self._config_payload(config)
+        return prepared
 
     async def run(self, replay_id: str, parameters: dict[str, object]) -> None:
         await self.repository.set_replay_running(replay_id)
@@ -82,6 +99,7 @@ class ReplayService:
         start_ms = int(start.timestamp() * 1000)
         end_ms = int(end.timestamp() * 1000)
         warmup_start_ms = int((start - timedelta(days=30)).timestamp() * 1000)
+        config = self._backtest_config(parameters)
         markets: dict[str, list[Candle]] = {}
         exchange_filters: dict[str, ExchangeFilters] = {}
         funding_rates: dict[str, dict[datetime, Decimal]] = {}
@@ -98,18 +116,207 @@ class ReplayService:
             self.engine.run_portfolio,
             markets,
             exchange_filters,
-            BacktestConfig(initial_equity=Decimal("1000")),
+            config,
             evaluation_start=start,
+            funding_rates=funding_rates,
+        )
+        split = start + (end - start) / 2
+        out_of_sample = await asyncio.to_thread(
+            self.engine.run_portfolio,
+            markets,
+            exchange_filters,
+            config,
+            evaluation_start=split,
             funding_rates=funding_rates,
         )
         portfolio = replay.to_dict()
         portfolio.pop("symbols", None)
+        out_of_sample_portfolio = out_of_sample.to_dict()
+        out_of_sample_portfolio.pop("symbols", None)
         return {
             "replay_mode": "deterministic",
             "reproducibility": "local_deterministic_strategy",
             "summary": self._summary(replay),
             "portfolio": portfolio,
             "symbols": replay.symbol_results,
+            "validation": {
+                "method": "chronological_holdout",
+                "split_at": split.isoformat(),
+                "in_sample_period": {
+                    "start": start.isoformat(),
+                    "end": split.isoformat(),
+                },
+                "out_of_sample_period": {
+                    "start": split.isoformat(),
+                    "end": end.isoformat(),
+                },
+                "out_of_sample": {
+                    "summary": self._summary(out_of_sample),
+                    "portfolio": out_of_sample_portfolio,
+                    "symbols": out_of_sample.symbol_results,
+                },
+            },
+            "strategy_parameters": {
+                "config_source": "runtime_settings_and_replay_request_snapshot",
+                "backtest_config": self._config_payload(config),
+                "take_profit_tranches": ["40%@1R", "40%@2R", "20% trailing"],
+            },
+        }
+
+    def _backtest_config(self, parameters: dict[str, object]) -> BacktestConfig:
+        settings = self.settings
+        if settings is None:
+            defaults = BacktestConfig()
+            base: dict[str, object] = asdict(defaults)
+        else:
+            minimum_stop = Decimal(str(settings.min_stop_atr))
+            maximum_stop = Decimal(str(settings.max_stop_atr))
+            base = {
+                "initial_equity": Decimal(str(settings.capital_limit_usdt)),
+                "risk_pct": Decimal(str(settings.single_trade_risk_pct)),
+                "stop_atr": min(max(Decimal("1.5"), minimum_stop), maximum_stop),
+                "trailing_atr": Decimal("1.5"),
+                "fee_rate": Decimal("0.0005"),
+                "slippage_rate": Decimal("0.0005"),
+                "estimated_funding_rate": Decimal("0.0001"),
+                "daily_loss_pct": Decimal(str(settings.daily_loss_pct)),
+                "max_drawdown_pct": Decimal(str(settings.max_drawdown_pct)),
+                "portfolio_risk_pct": Decimal(str(settings.portfolio_risk_pct)),
+                "max_leverage": settings.max_leverage,
+                "max_margin_pct": Decimal(str(settings.max_margin_pct)),
+                "max_positions": settings.max_positions,
+                "max_same_direction": settings.max_same_direction,
+            "correlation_limit": Decimal(str(settings.correlation_limit)),
+            "candidate_count": settings.candidate_count,
+                "max_spread_pct": Decimal(str(settings.max_spread_pct)),
+                "max_abs_funding_rate": Decimal(str(settings.max_abs_funding_rate)),
+                "max_abs_basis_pct": Decimal(str(settings.max_abs_basis_pct)),
+                "min_book_depth_usdt": Decimal(str(settings.min_book_depth_usdt)),
+                "min_listing_days": settings.min_listing_days,
+                "max_volatility_percentile": Decimal("0.99"),
+                "entry_direction": settings.entry_direction,
+                "entry_trigger": settings.entry_trigger,
+                "min_confidence": Decimal(str(settings.min_confidence)),
+                "min_net_reward_risk": Decimal(str(settings.min_net_reward_risk)),
+                "min_stop_atr": minimum_stop,
+                "max_stop_atr": maximum_stop,
+                "trend_adx_min": Decimal(str(settings.trend_adx_min)),
+                "volatility_soft_limit_percentile": Decimal(
+                    str(settings.volatility_soft_limit_percentile)
+                ),
+                "volatility_hard_limit_percentile": Decimal(
+                    str(settings.volatility_hard_limit_percentile)
+                ),
+                "elevated_volatility_risk_multiplier": Decimal(
+                    str(settings.elevated_volatility_risk_multiplier)
+                ),
+                "high_volatility_risk_multiplier": Decimal(
+                    str(settings.high_volatility_risk_multiplier)
+                ),
+            }
+        raw_overrides = parameters.get("backtest_config")
+        overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
+        decimal_fields = {
+            "initial_equity",
+            "risk_pct",
+            "stop_atr",
+            "trailing_atr",
+            "fee_rate",
+            "slippage_rate",
+            "estimated_funding_rate",
+            "daily_loss_pct",
+            "max_drawdown_pct",
+            "portfolio_risk_pct",
+            "max_margin_pct",
+            "correlation_limit",
+            "max_spread_pct",
+            "max_abs_funding_rate",
+            "max_abs_basis_pct",
+            "min_book_depth_usdt",
+            "min_confidence",
+            "min_net_reward_risk",
+            "min_stop_atr",
+            "max_stop_atr",
+            "trend_adx_min",
+            "volatility_soft_limit_percentile",
+            "volatility_hard_limit_percentile",
+            "elevated_volatility_risk_multiplier",
+            "high_volatility_risk_multiplier",
+        }
+        integer_fields = {
+            "max_leverage",
+            "max_positions",
+            "max_same_direction",
+            "candidate_count",
+            "min_listing_days",
+        }
+        for key, value in overrides.items():
+            if value is None or key not in base:
+                continue
+            if key in decimal_fields:
+                base[key] = Decimal(str(value))
+            elif key in integer_fields:
+                base[key] = int(str(value))
+            else:
+                base[key] = str(value)
+        if "stop_atr" not in overrides:
+            min_stop = cast(Decimal, base["min_stop_atr"])
+            max_stop = cast(Decimal, base["max_stop_atr"])
+            base["stop_atr"] = min(max(cast(Decimal, base["stop_atr"]), min_stop), max_stop)
+        config = BacktestConfig(
+            initial_equity=cast(Decimal, base["initial_equity"]),
+            risk_pct=cast(Decimal, base["risk_pct"]),
+            stop_atr=cast(Decimal, base["stop_atr"]),
+            trailing_atr=cast(Decimal, base["trailing_atr"]),
+            fee_rate=cast(Decimal, base["fee_rate"]),
+            slippage_rate=cast(Decimal, base["slippage_rate"]),
+            estimated_funding_rate=cast(Decimal, base["estimated_funding_rate"]),
+            daily_loss_pct=cast(Decimal, base["daily_loss_pct"]),
+            max_drawdown_pct=cast(Decimal, base["max_drawdown_pct"]),
+            portfolio_risk_pct=cast(Decimal, base["portfolio_risk_pct"]),
+            max_leverage=cast(int, base["max_leverage"]),
+            max_margin_pct=cast(Decimal, base["max_margin_pct"]),
+            max_positions=cast(int, base["max_positions"]),
+            max_same_direction=cast(int, base["max_same_direction"]),
+            correlation_limit=cast(Decimal, base["correlation_limit"]),
+            candidate_count=cast(int, base["candidate_count"]),
+            entry_direction=cast(str, base["entry_direction"]),
+            entry_trigger=cast(str, base["entry_trigger"]),
+            min_confidence=cast(Decimal, base["min_confidence"]),
+            min_net_reward_risk=cast(Decimal, base["min_net_reward_risk"]),
+            min_stop_atr=cast(Decimal, base["min_stop_atr"]),
+            max_stop_atr=cast(Decimal, base["max_stop_atr"]),
+            trend_adx_min=cast(Decimal, base["trend_adx_min"]),
+            volatility_soft_limit_percentile=cast(
+                Decimal, base["volatility_soft_limit_percentile"]
+            ),
+            volatility_hard_limit_percentile=cast(
+                Decimal, base["volatility_hard_limit_percentile"]
+            ),
+            elevated_volatility_risk_multiplier=cast(
+                Decimal, base["elevated_volatility_risk_multiplier"]
+            ),
+            high_volatility_risk_multiplier=cast(
+                Decimal, base["high_volatility_risk_multiplier"]
+            ),
+        )
+        if config.min_stop_atr > config.max_stop_atr:
+            raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if config.stop_atr < config.min_stop_atr:
+            raise ValueError("stop_atr cannot be below min_stop_atr")
+        if config.stop_atr > config.max_stop_atr:
+            raise ValueError("stop_atr cannot exceed max_stop_atr")
+        if config.volatility_soft_limit_percentile > config.volatility_hard_limit_percentile:
+            raise ValueError(
+                "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
+            )
+        return config
+
+    @staticmethod
+    def _config_payload(config: BacktestConfig) -> dict[str, object]:
+        return {
+            key: str(value) if isinstance(value, Decimal) else value
+            for key, value in asdict(config).items()
         }
 
     async def _run_recorded_portfolio(
