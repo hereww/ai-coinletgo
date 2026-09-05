@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -12,6 +12,115 @@ from trading_system.domain.enums import DecisionStatus, OrderStatus, PositionSid
 from trading_system.domain.models import OrderState, RiskDecision
 from trading_system.persistence.database import Database
 from trading_system.persistence.repository import Repository
+
+
+def income_row(
+    income_id: str,
+    income_type: str,
+    income: str,
+    event_time: datetime,
+    *,
+    symbol: str = "BTCUSDT",
+    trade_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "income_id": income_id,
+        "symbol": symbol,
+        "income_type": income_type,
+        "income": income,
+        "asset": "USDT",
+        "trade_id": trade_id,
+        "event_time": event_time,
+        "payload": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_income_ledger_groups_pnl_by_shanghai_day_and_trade_id(tmp_path: object) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'income-ledger.db'}")
+    await database.create_schema()
+    repository = Repository(database, "Asia/Shanghai")
+    rows = [
+        # 2026-09-03 23:59:59 in Shanghai: outside the requested range.
+        income_row(
+            "outside-range",
+            "REALIZED_PNL",
+            "99",
+            datetime(2026, 9, 3, 15, 59, 59, tzinfo=UTC),
+            trade_id="ignored",
+        ),
+        # Exactly midnight in Shanghai on 2026-09-04.
+        income_row(
+            "realized-1",
+            "REALIZED_PNL",
+            "5",
+            datetime(2026, 9, 3, 16, 0, tzinfo=UTC),
+            trade_id="1001",
+        ),
+        income_row(
+            "commission-1",
+            "COMMISSION",
+            "-0.5",
+            datetime(2026, 9, 3, 16, 1, tzinfo=UTC),
+            trade_id="1001",
+        ),
+        income_row(
+            "funding-1",
+            "FUNDING_FEE",
+            "-0.25",
+            datetime(2026, 9, 3, 20, 0, tzinfo=UTC),
+        ),
+        # Exactly midnight in Shanghai on 2026-09-05.
+        income_row(
+            "realized-2",
+            "REALIZED_PNL",
+            "-3",
+            datetime(2026, 9, 4, 16, 0, tzinfo=UTC),
+            symbol="ETHUSDT",
+            trade_id="2001",
+        ),
+        income_row(
+            "commission-2",
+            "COMMISSION",
+            "-0.3",
+            datetime(2026, 9, 4, 16, 1, tzinfo=UTC),
+            symbol="ETHUSDT",
+            trade_id="2001",
+        ),
+        # Income types outside the PnL definition remain queryable, but do not affect PnL.
+        income_row(
+            "insurance-1",
+            "INSURANCE_CLEAR",
+            "100",
+            datetime(2026, 9, 3, 17, 0, tzinfo=UTC),
+        ),
+    ]
+    try:
+        assert await repository.save_income_ledger(rows) == len(rows)
+        assert await repository.save_income_ledger(rows) == 0
+
+        ledger = await repository.list_income_ledger(date(2026, 9, 4), date(2026, 9, 4))
+        daily = await repository.list_daily_pnl(date(2026, 9, 4), date(2026, 9, 5))
+        trades = await repository.list_trade_pnl(date(2026, 9, 4), date(2026, 9, 5))
+    finally:
+        await database.dispose()
+
+    assert {row["income_id"] for row in ledger} == {
+        "realized-1",
+        "commission-1",
+        "funding-1",
+        "insurance-1",
+    }
+    assert [(row["date"], row["net_pnl"]) for row in daily] == [
+        ("2026-09-05", "-3.3000000000"),
+        ("2026-09-04", "4.2500000000"),
+    ]
+    assert daily[1]["event_count"] == 3
+    assert [row["trade_id"] for row in trades] == ["2001", "1001"]
+    assert trades[1]["realized_pnl"] == "5.0000000000"
+    assert trades[1]["commission"] == "-0.5000000000"
+    assert trades[1]["funding_fee"] == "0"
+    assert trades[1]["net_pnl"] == "4.5000000000"
 
 
 @pytest.mark.asyncio

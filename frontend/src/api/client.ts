@@ -1,4 +1,21 @@
-import type { AuditEvent, DashboardData, IntegrationStatus, ManualEntryAdvice, ManualEntryDraft, ManualEntryResult, MarketRow, OrderRow, PortfolioDecision, ReplayRun, RiskConfig, Signal } from './types'
+import type {
+  AuditEvent,
+  DailyPnlRow,
+  DashboardData,
+  IncomeLedgerRow,
+  IntegrationStatus,
+  ManualEntryAdvice,
+  ManualEntryDraft,
+  ManualEntryResult,
+  MarketRow,
+  OrderRow,
+  PnlSyncResult,
+  PortfolioDecision,
+  ReplayRun,
+  RiskConfig,
+  Signal,
+  TradePnlRow,
+} from './types'
 
 const configuredBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').trim()
 export const apiBaseUrl = configuredBaseUrl.replace(/\/$/, '')
@@ -32,6 +49,10 @@ const FIELD_LABELS: Record<string, string> = {
   min_net_reward_risk: '最低净盈亏比',
   min_stop_atr: '最小止损距离',
   max_stop_atr: '最大止损距离',
+  manual_stop_atr: '手动止损距离',
+  manual_take_profit_atr: '手动止盈距离',
+  model_primary_portfolio_enabled: '模型主导组合决策',
+  strong_trend_adx_min: '强趋势最低 ADX',
   trend_adx_min: '最低趋势强度',
   volatility_soft_limit_percentile: '高波动分位',
   volatility_hard_limit_percentile: '极端波动分位',
@@ -45,7 +66,10 @@ const FIELD_LABELS: Record<string, string> = {
 
 const MESSAGE_TRANSLATIONS: Record<string, string> = {
   'minimum stop ATR cannot exceed maximum stop ATR': '最小止损距离不能大于最大止损距离',
+  'manual stop ATR cannot exceed maximum stop ATR': '手动止损距离不能大于最大止损距离',
   'volatility soft limit cannot exceed hard limit': '高波动分位不能大于极端波动分位',
+  'strong trend entry override is limited to Binance testnet': '强劲上升趋势放行仅限 Binance 测试网',
+  'model-primary portfolio mode is limited to Binance testnet': '模型主导组合决策仅限 Binance 测试网',
   'Password verification failed': '操作密码验证失败',
   'Authentication required': '需要登录后才能执行此操作',
   'Session expired': '登录已过期，请重新登录',
@@ -160,6 +184,17 @@ export const api = {
   cycleStatus: () => request<DashboardData['cycle_status']>('/api/v1/cycle-status'),
   market: () => request<MarketRow[]>('/api/v1/market'),
   orders: () => request<OrderRow[]>('/api/v1/orders'),
+  pnlTrades: (startDate: string, endDate: string) =>
+    request<TradePnlRow[]>(`/api/v1/pnl/trades?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`),
+  pnlDaily: (startDate: string, endDate: string) =>
+    request<DailyPnlRow[]>(`/api/v1/pnl/daily?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`),
+  pnlLedger: (startDate: string, endDate: string) =>
+    request<IncomeLedgerRow[]>(`/api/v1/pnl/ledger?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`),
+  syncPnl: (payload: { start_date: string; end_date: string }) =>
+    request<PnlSyncResult>('/api/v1/pnl/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   audit: () => request<AuditEvent[]>('/api/v1/audit'),
   config: () => request<RiskConfig>('/api/v1/config'),
   integrations: () => request<IntegrationStatus>('/api/v1/integrations'),
@@ -274,6 +309,11 @@ export const api = {
       min_net_reward_risk: string
       min_stop_atr: string
       max_stop_atr: string
+      manual_exit_levels_enabled: boolean
+      manual_stop_atr: string
+      manual_take_profit_atr: string
+      strong_trend_entry_override_enabled: boolean
+      strong_trend_adx_min: string
       trend_adx_min: string
       volatility_soft_limit_percentile: string
       volatility_hard_limit_percentile: string

@@ -268,6 +268,15 @@ class RiskLimits(BaseModel):
     correlation_limit: Decimal = Field(default=Decimal("0.80"), ge=0, le=1)
     min_stop_atr: PositiveDecimal = Decimal("0.80")
     max_stop_atr: PositiveDecimal = Decimal("2.50")
+    manual_exit_levels_enabled: bool = False
+    manual_stop_atr: PositiveDecimal = Decimal("1.80")
+    manual_take_profit_atr: PositiveDecimal = Decimal("5.00")
+    model_primary_portfolio_enabled: bool = False
+    # The runtime Settings object enables this by default on testnet.  Keep the
+    # domain model fail-closed unless the environment-specific runtime value is
+    # explicitly passed through to the risk compiler.
+    strong_trend_entry_override_enabled: bool = False
+    strong_trend_adx_min: NonNegativeDecimal = Decimal("30")
     min_confidence: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
     min_net_reward_risk: PositiveDecimal = Decimal("2.0")
     entry_direction: Literal["both", "long_only", "short_only"] = "both"
@@ -287,6 +296,8 @@ class RiskLimits(BaseModel):
     def validate_stop_range(self) -> RiskLimits:
         if self.min_stop_atr > self.max_stop_atr:
             raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if self.manual_exit_levels_enabled and self.manual_stop_atr > self.max_stop_atr:
+            raise ValueError("manual_stop_atr cannot exceed max_stop_atr")
         if self.volatility_soft_limit_percentile > self.volatility_hard_limit_percentile:
             raise ValueError(
                 "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"

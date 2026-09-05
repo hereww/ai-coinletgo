@@ -8,6 +8,7 @@ from trading_system.domain.models import (
     MarketSnapshot,
     RiskContext,
     RiskDecision,
+    RiskLimits,
     TradeSignal,
 )
 
@@ -31,6 +32,11 @@ class RiskEngine:
         if reasons:
             return self._reject_with_prices(signal, snapshot, reasons, context)
 
+        strong_trend_override_used = self._strong_uptrend_override(
+            signal, snapshot, context.limits
+        )
+        model_primary = context.limits.model_primary_portfolio_enabled
+
         entry = self._entry_price(signal, snapshot)
         stop = signal.invalidation_price or Decimal("0")
         target = signal.target_price or Decimal("0")
@@ -47,7 +53,11 @@ class RiskEngine:
         round_trip_cost += estimated_funding_cost
         net_reward = max(Decimal("0"), raw_reward - round_trip_cost)
         net_reward_risk = net_reward / (stop_distance + round_trip_cost)
-        if net_reward_risk < context.limits.min_net_reward_risk:
+        if (
+            net_reward_risk < context.limits.min_net_reward_risk
+            and not model_primary
+            and not strong_trend_override_used
+        ):
             return self._reject(signal, ["net_reward_risk_below_minimum"])
 
         capital_base = min(context.account.equity, context.limits.capital_limit_usdt)
@@ -103,7 +113,13 @@ class RiskEngine:
         return RiskDecision(
             signal_id=signal.signal_id,
             status=DecisionStatus.APPROVED,
-            reasons=["all_hard_limits_passed"],
+            reasons=(
+                ["model_primary_opportunity_accepted", "all_hard_limits_passed"]
+                if model_primary
+                else ["strong_trend_entry_override"]
+                if strong_trend_override_used
+                else ["all_hard_limits_passed"]
+            ),
             capital_base=capital_base,
             risk_amount_usdt=quantity * abs(entry - stop),
             quantity=quantity,
@@ -155,6 +171,10 @@ class RiskEngine:
         context: RiskContext,
     ) -> list[str]:
         reasons = self.check_circuit_breakers(context)
+        model_primary = context.limits.model_primary_portfolio_enabled
+        strong_trend_override = self._strong_uptrend_override(
+            signal, snapshot, context.limits
+        )
         if context.mode not in {SystemMode.TESTNET, SystemMode.LIVE_ENABLED}:
             reasons.append("system_mode_disallows_entries")
         if signal.action == SignalAction.NO_TRADE:
@@ -171,16 +191,20 @@ class RiskEngine:
             reasons.append("signal_expired")
         if signal.symbol != snapshot.symbol:
             reasons.append("signal_snapshot_symbol_mismatch")
-        if signal.confidence < context.limits.min_confidence:
-            reasons.append("confidence_below_minimum")
-        if snapshot.market_regime != "TRENDING":
-            reasons.append("market_regime_not_trending")
-        if snapshot.adx_1h < context.limits.trend_adx_min:
-            reasons.append("trend_strength_below_minimum")
-        if not self._trend_matches_signal(signal, snapshot):
-            reasons.append("trend_not_aligned")
-        if not self._entry_trigger_matches(signal, snapshot, context.limits.entry_trigger):
-            reasons.append("no_aligned_entry_trigger")
+        if not model_primary:
+            if signal.confidence < context.limits.min_confidence and not strong_trend_override:
+                reasons.append("confidence_below_minimum")
+            if snapshot.market_regime != "TRENDING":
+                reasons.append("market_regime_not_trending")
+            if snapshot.adx_1h < context.limits.trend_adx_min:
+                reasons.append("trend_strength_below_minimum")
+            if not self._trend_matches_signal(signal, snapshot):
+                reasons.append("trend_not_aligned")
+            trigger_matches = self._configured_entry_trigger_matches(
+                signal, snapshot, context.limits.entry_trigger
+            )
+            if not trigger_matches and not strong_trend_override:
+                reasons.append("no_aligned_entry_trigger")
         if snapshot.volatility_risk_multiplier <= 0:
             reasons.append("invalid_volatility_risk_multiplier")
         if len(context.positions) >= context.limits.max_positions:
@@ -190,15 +214,20 @@ class RiskEngine:
             PositionSide.LONG if signal.action == SignalAction.OPEN_LONG else PositionSide.SHORT
         )
         same_direction = sum(position.side == desired_side for position in context.positions)
-        if same_direction >= context.limits.max_same_direction:
+        if (
+            same_direction >= context.limits.max_same_direction
+            and not model_primary
+            and not strong_trend_override
+        ):
             reasons.append("same_direction_limit_reached")
         if any(position.symbol == signal.symbol for position in context.positions):
             reasons.append("existing_symbol_position")
-        for position in context.positions:
-            correlation = abs(context.correlations.get(position.symbol, Decimal("1")))
-            if correlation > context.limits.correlation_limit:
-                reasons.append(f"correlated_with_{position.symbol}")
-                break
+        if not model_primary and not strong_trend_override:
+            for position in context.positions:
+                correlation = abs(context.correlations.get(position.symbol, Decimal("1")))
+                if correlation > context.limits.correlation_limit:
+                    reasons.append(f"correlated_with_{position.symbol}")
+                    break
 
         if signal.invalidation_price is not None:
             entry = self._entry_price(signal, snapshot)
@@ -221,6 +250,16 @@ class RiskEngine:
     def _entry_trigger_matches(
         signal: TradeSignal,
         snapshot: MarketSnapshot,
+        limits: RiskLimits,
+    ) -> bool:
+        return RiskEngine._configured_entry_trigger_matches(
+            signal, snapshot, limits.entry_trigger
+        ) or RiskEngine._strong_uptrend_override(signal, snapshot, limits)
+
+    @staticmethod
+    def _configured_entry_trigger_matches(
+        signal: TradeSignal,
+        snapshot: MarketSnapshot,
         entry_trigger: str,
     ) -> bool:
         direction = 1 if signal.action == SignalAction.OPEN_LONG else -1
@@ -229,6 +268,21 @@ class RiskEngine:
         if entry_trigger == "pullback_only":
             return snapshot.pullback_15m == direction
         return snapshot.breakout_15m == direction or snapshot.pullback_15m == direction
+
+    @staticmethod
+    def _strong_uptrend_override(
+        signal: TradeSignal,
+        snapshot: MarketSnapshot,
+        limits: RiskLimits,
+    ) -> bool:
+        return (
+            signal.action == SignalAction.OPEN_LONG
+            and limits.strong_trend_entry_override_enabled
+            and snapshot.market_regime == "TRENDING"
+            and snapshot.trend_1h == 1
+            and snapshot.trend_4h == 1
+            and snapshot.adx_1h >= limits.strong_trend_adx_min
+        )
 
     @staticmethod
     def _entry_price(signal: TradeSignal, snapshot: MarketSnapshot) -> Decimal:

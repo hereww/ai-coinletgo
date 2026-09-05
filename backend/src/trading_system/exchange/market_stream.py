@@ -46,6 +46,32 @@ class BinanceMarketStream:
                 if not self._stopped:
                     await asyncio.sleep(self.reconnect_delay)
 
+    async def depth_events(self, symbols: list[str]) -> AsyncIterator[dict[str, Any]]:
+        """Yield raw Binance diff-depth events for the independent HFT data plane."""
+        streams = [f"{symbol.lower()}@depth@100ms" for symbol in symbols]
+        if not streams:
+            return
+        url = f"{self.ws_base_url}/stream?streams={'/'.join(streams)}"
+        while not self._stopped:
+            try:
+                async with websockets.connect(
+                    url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    proxy=self.proxy_url if self.proxy_url else None,
+                ) as socket:
+                    yield {"_stream_event": "connected"}
+                    async for message in socket:
+                        payload = json.loads(message)
+                        if not isinstance(payload, dict):
+                            continue
+                        data = payload.get("data", payload)
+                        if isinstance(data, dict) and data.get("e") == "depthUpdate":
+                            yield data
+            except (OSError, websockets.WebSocketException, json.JSONDecodeError):
+                if not self._stopped:
+                    await asyncio.sleep(self.reconnect_delay)
+
 
 class BinanceUserDataStream:
     def __init__(

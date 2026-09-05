@@ -16,7 +16,11 @@ from trading_system.domain.models import (
     UniverseSymbol,
 )
 from trading_system.exchange.base import ExchangeError, ExchangeGateway
-from trading_system.execution.manager import ExecutionManager, ProtectionError
+from trading_system.execution.manager import (
+    EntryNotSubmittedError,
+    ExecutionManager,
+    ProtectionError,
+)
 
 
 class FakeExchange(ExchangeGateway):
@@ -221,3 +225,24 @@ async def test_mode_guard_stops_repricing_after_pause() -> None:
 
     assert entry.status == OrderStatus.CANCELED
     assert exchange.entry_ids == ["frc_d7d53c601a2a411da6_e0"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_entry_rejection_is_marked_as_no_submission() -> None:
+    exchange = FakeExchange()
+
+    async def reject_entry(
+        execution_intent: ExecutionIntent, client_order_id: str, price: Decimal
+    ) -> OrderState:
+        del execution_intent, client_order_id, price
+        raise ExchangeError(
+            "400 [-1111]: Precision is over the maximum defined",
+            code=-1111,
+            http_status=400,
+        )
+
+    exchange.place_limit_entry = reject_entry  # type: ignore[method-assign]
+
+    with pytest.raises(EntryNotSubmittedError, match="explicitly rejected"):
+        await ExecutionManager(exchange, reprice_seconds=1, sleep=no_sleep).execute(intent())
+    assert exchange.entry_ids == []

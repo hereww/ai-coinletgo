@@ -17,6 +17,9 @@ class MarketScreener:
         max_volatility_percentile: Decimal = Decimal("0.99"),
         entry_trigger: str = "breakout_or_pullback",
         trend_adx_min: Decimal = Decimal("20"),
+        model_primary_portfolio_enabled: bool = False,
+        strong_trend_entry_override_enabled: bool = False,
+        strong_trend_adx_min: Decimal = Decimal("30"),
         volatility_soft_limit_percentile: Decimal = Decimal("0.75"),
         volatility_hard_limit_percentile: Decimal = Decimal("0.90"),
     ) -> None:
@@ -28,6 +31,9 @@ class MarketScreener:
         self.max_volatility_percentile = max_volatility_percentile
         self.entry_trigger = entry_trigger
         self.trend_adx_min = trend_adx_min
+        self.model_primary_portfolio_enabled = model_primary_portfolio_enabled
+        self.strong_trend_entry_override_enabled = strong_trend_entry_override_enabled
+        self.strong_trend_adx_min = strong_trend_adx_min
         self.volatility_soft_limit_percentile = volatility_soft_limit_percentile
         self.volatility_hard_limit_percentile = volatility_hard_limit_percentile
 
@@ -44,7 +50,17 @@ class MarketScreener:
         they no longer prevent the model from seeing every otherwise-tradable
         market.  Legacy signal-v1 continues to use ``eligible`` unchanged.
         """
-        return not self._market_reasons(snapshot)
+        reasons = self._market_reasons(snapshot)
+        if self.model_primary_portfolio_enabled:
+            # Regime is useful evidence for a model-led decision, but it is
+            # not an execution-safety failure by itself.  Keep all market
+            # data, liquidity and extreme-volatility protections intact.
+            reasons = [
+                reason
+                for reason in reasons
+                if reason not in {"volatile_regime", "uncertain_regime"}
+            ]
+        return not reasons
 
     def rank_portfolio(
         self, snapshots: list[MarketSnapshot], limit: int | None = None
@@ -96,9 +112,21 @@ class MarketScreener:
             else snapshot.pullback_15m,
         }
         trigger = triggers[self.entry_trigger]
-        if trigger == 0 or trigger != snapshot.trend_1h:
+        if (
+            (trigger == 0 or trigger != snapshot.trend_1h)
+            and not self._strong_uptrend_override(snapshot)
+        ):
             reasons.append("no_aligned_entry_trigger")
         return reasons
+
+    def _strong_uptrend_override(self, snapshot: MarketSnapshot) -> bool:
+        return (
+            self.strong_trend_entry_override_enabled
+            and snapshot.market_regime == "TRENDING"
+            and snapshot.trend_1h == 1
+            and snapshot.trend_4h == 1
+            and snapshot.adx_1h >= self.strong_trend_adx_min
+        )
 
     def score(self, snapshot: MarketSnapshot) -> Decimal:
         trend_score = Decimal("1") if snapshot.trend_1h == snapshot.trend_4h != 0 else 0
@@ -112,6 +140,7 @@ class MarketScreener:
         trigger_score = (
             Decimal("1")
             if trigger_values[self.entry_trigger] == snapshot.trend_1h
+            or self._strong_uptrend_override(snapshot)
             else Decimal("0")
         )
         adx_score = min(snapshot.adx_1h / Decimal("40"), Decimal("1"))

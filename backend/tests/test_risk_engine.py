@@ -41,6 +41,117 @@ def test_configured_leverage_can_reach_30_without_increasing_risk_amount() -> No
     assert leveraged.estimated_margin < baseline.estimated_margin
 
 
+def test_strong_uptrend_override_allows_long_without_15m_trigger() -> None:
+    limits = context().limits.model_copy(
+        update={"strong_trend_entry_override_enabled": True, "strong_trend_adx_min": 30}
+    )
+    decision = RiskEngine().evaluate(
+        signal(),
+        snapshot(breakout_15m=0, pullback_15m=0),
+        context(limits=limits),
+    )
+    assert decision.status == DecisionStatus.APPROVED
+    assert "strong_trend_entry_override" in decision.reasons
+
+
+def test_model_primary_accepts_low_confidence_ranging_signal() -> None:
+    limits = context().limits.model_copy(
+        update={"model_primary_portfolio_enabled": True, "min_net_reward_risk": 3}
+    )
+    result = RiskEngine().evaluate(
+        signal(confidence=Decimal("0.1"), target_price=Decimal("100.2")),
+        snapshot(
+            market_regime="RANGING",
+            trend_1h=-1,
+            trend_4h=-1,
+            adx_1h=Decimal("5"),
+            breakout_15m=0,
+            pullback_15m=0,
+        ),
+        context(limits=limits),
+    )
+    assert result.status == DecisionStatus.APPROVED
+    assert "model_primary_opportunity_accepted" in result.reasons
+
+
+def test_model_primary_keeps_hard_stop_and_margin_guards() -> None:
+    limits = context().limits.model_copy(update={"model_primary_portfolio_enabled": True})
+    result = RiskEngine().evaluate(
+        signal(invalidation_price=Decimal("99.5")),
+        snapshot(),
+        context(limits=limits),
+    )
+    assert result.status == DecisionStatus.REJECTED
+    assert "stop_too_close" in result.reasons
+
+
+def test_strong_uptrend_override_bypasses_opportunity_filters() -> None:
+    limits = context().limits.model_copy(
+        update={
+            "strong_trend_entry_override_enabled": True,
+            "strong_trend_adx_min": Decimal("30"),
+            "max_same_direction": 1,
+            "correlation_limit": Decimal("0.1"),
+        }
+    )
+    existing = position(symbol="ETHUSDT", side=PositionSide.LONG)
+    decision = RiskEngine().evaluate(
+        signal(confidence=Decimal("0.1"), target_price=Decimal("100.2")),
+        snapshot(breakout_15m=1, pullback_15m=0),
+        context(
+            limits=limits,
+            positions=[existing],
+            correlations={"ETHUSDT": Decimal("0.99")},
+        ),
+    )
+
+    assert decision.status == DecisionStatus.APPROVED
+    assert "strong_trend_entry_override" in decision.reasons
+
+
+def test_strong_uptrend_override_keeps_circuit_breakers() -> None:
+    limits = context().limits.model_copy(
+        update={"strong_trend_entry_override_enabled": True}
+    )
+    account = AccountState(
+        equity=Decimal("940"),
+        available_balance=Decimal("900"),
+        day_start_equity=Decimal("950"),
+        high_water_mark=Decimal("1000"),
+    )
+    decision = RiskEngine().evaluate(
+        signal(confidence=Decimal("0.1"), target_price=Decimal("100.2")),
+        snapshot(breakout_15m=0, pullback_15m=0),
+        context(limits=limits, account=account),
+    )
+
+    assert decision.status == DecisionStatus.REJECTED
+    assert "daily_loss_limit_reached" in decision.reasons
+    assert "max_drawdown_reached" in decision.reasons
+
+
+def test_strong_uptrend_override_does_not_bypass_short_trigger() -> None:
+    limits = context().limits.model_copy(
+        update={"strong_trend_entry_override_enabled": True, "strong_trend_adx_min": 30}
+    )
+    decision = RiskEngine().evaluate(
+        signal(
+            action="OPEN_SHORT",
+            invalidation_price=Decimal("101"),
+            target_price=Decimal("97"),
+        ),
+        snapshot(
+            trend_1h=-1,
+            trend_4h=-1,
+            breakout_15m=0,
+            pullback_15m=0,
+        ),
+        context(limits=limits),
+    )
+    assert decision.status == DecisionStatus.REJECTED
+    assert "no_aligned_entry_trigger" in decision.reasons
+
+
 def test_high_volatility_reduces_risk_budget_without_changing_leverage() -> None:
     engine = RiskEngine()
     baseline = engine.evaluate(signal(), snapshot(), context())

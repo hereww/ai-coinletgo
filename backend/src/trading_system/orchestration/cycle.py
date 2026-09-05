@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from trading_system.ai.client import ModelUnavailableError, ResponsesModelClient
@@ -36,7 +37,7 @@ from trading_system.domain.models import (
 from trading_system.exchange.base import ExchangeError, ExchangeUnknownStatusError
 from trading_system.exchange.binance import BinanceUSDMarketClient
 from trading_system.execution.exit import ExitExecutionManager
-from trading_system.execution.manager import ExecutionManager
+from trading_system.execution.manager import EntryNotSubmittedError, ExecutionManager
 from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.repository import Repository
 from trading_system.risk.engine import RiskEngine
@@ -46,6 +47,10 @@ from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import build_snapshot
 
 logger = logging.getLogger("trading-worker.cycle")
+
+
+class PortfolioActionValidationError(RuntimeError):
+    """A locally-built entry intent is invalid before any exchange request."""
 
 
 @dataclass
@@ -89,6 +94,9 @@ class TradingCycle:
             min_listing_days=settings.min_listing_days,
             entry_trigger=settings.entry_trigger,
             trend_adx_min=Decimal(str(settings.trend_adx_min)),
+            model_primary_portfolio_enabled=settings.model_primary_portfolio_enabled,
+            strong_trend_entry_override_enabled=settings.strong_trend_entry_override_enabled,
+            strong_trend_adx_min=Decimal(str(settings.strong_trend_adx_min)),
             volatility_soft_limit_percentile=Decimal(str(settings.volatility_soft_limit_percentile)),
             volatility_hard_limit_percentile=Decimal(str(settings.volatility_hard_limit_percentile)),
         )
@@ -284,6 +292,15 @@ class TradingCycle:
         await self.repository.apply_runtime_config(self.settings)
         self.screener.entry_trigger = self.settings.entry_trigger
         self.screener.trend_adx_min = Decimal(str(self.settings.trend_adx_min))
+        self.screener.model_primary_portfolio_enabled = (
+            self.settings.model_primary_portfolio_enabled
+        )
+        self.screener.strong_trend_entry_override_enabled = (
+            self.settings.strong_trend_entry_override_enabled
+        )
+        self.screener.strong_trend_adx_min = Decimal(
+            str(self.settings.strong_trend_adx_min)
+        )
         self.screener.volatility_soft_limit_percentile = Decimal(
             str(self.settings.volatility_soft_limit_percentile)
         )
@@ -852,6 +869,28 @@ class TradingCycle:
                         action.action.value,
                     )
                     continue
+                # Pre-flight failures and confirmed 4xx entry rejections have
+                # no entry order or position behind them.  Record that the
+                # model opportunity was rejected, but preserve the rest of
+                # this portfolio plan and do not place the whole account into
+                # PAUSED.  Unknown writes, cancellations, partial fills, and
+                # every protection failure deliberately bypass this branch.
+                if isinstance(error, (EntryNotSubmittedError, PortfolioActionValidationError)):
+                    await self.repository.save_portfolio_execution(
+                        plan,
+                        action,
+                        status="REJECTED",
+                        orders=[],
+                        detail=str(error)[:400],
+                    )
+                    logger.info(
+                        "portfolio entry rejected without submission "
+                        "symbol=%s action=%s detail=%s",
+                        action.symbol,
+                        action.action.value,
+                        str(error)[:300],
+                    )
+                    continue
                 result.failed = True
                 await self.repository.save_portfolio_execution(
                     plan, action, status="FAILED", orders=[], detail=str(error)[:400]
@@ -1017,29 +1056,46 @@ class TradingCycle:
                 )
             entry_min = action.entry_min or entry * Decimal("0.997")
             entry_max = action.entry_max or entry * Decimal("1.003")
+            tp1_price = self._safe_first_take_profit(
+                entry=entry,
+                stop_price=action.stop_price,
+                target_price=action.target_price,
+                side=action.side,
+            )
             from trading_system.domain.models import ExecutionIntent
 
             intent_id = uuid5(
                 NAMESPACE_URL,
                 f"portfolio:{decision.decision_id}:{action.action_id}",
             )
-            intent = ExecutionIntent(
-                intent_id=intent_id,
-                signal_id=intent_id,
-                symbol=action.symbol,
-                side=action.side,
-                quantity=quantity,
-                limit_price=entry,
-                entry_min=min(entry_min, entry_max),
-                entry_max=max(entry_min, entry_max),
-                stop_price=action.stop_price,
-                tp1_price=(entry + abs(entry - action.stop_price))
-                if action.side == PositionSide.LONG
-                else (entry - abs(entry - action.stop_price)),
-                tp2_price=action.target_price,
-                leverage=self.settings.max_leverage,
-                expires_at=decision.expires_at,
-            )
+            try:
+                intent = ExecutionIntent(
+                    intent_id=intent_id,
+                    signal_id=intent_id,
+                    symbol=action.symbol,
+                    side=action.side,
+                    quantity=quantity,
+                    limit_price=entry,
+                    entry_min=min(entry_min, entry_max),
+                    entry_max=max(entry_min, entry_max),
+                    stop_price=action.stop_price,
+                    tp1_price=tp1_price,
+                    tp2_price=action.target_price,
+                    leverage=self.settings.max_leverage,
+                    expires_at=decision.expires_at,
+                )
+            except ValidationError as error:
+                # The deterministic compiler or a model price can still
+                # produce a malformed local entry intent.  No exchange call
+                # has happened at this point, so reject only this allocation
+                # rather than pausing the account.
+                detail = "; ".join(
+                    item.get("msg", "invalid execution intent")
+                    for item in error.errors()
+                )[:300]
+                raise PortfolioActionValidationError(
+                    f"local entry intent invalid: {detail}"
+                ) from error
             order, protection = await self.execution.execute(intent)
             orders = [order, *protection]
             if action.action == PortfolioPlanActionType.ADD and order.filled_quantity > 0:
@@ -1060,6 +1116,42 @@ class TradingCycle:
                     )
             return self._tag_portfolio_orders(orders, action, decision)
         raise ExchangeError(f"unsupported portfolio action: {action.action}")
+
+    @staticmethod
+    def _safe_first_take_profit(
+        *,
+        entry: Decimal,
+        stop_price: Decimal,
+        target_price: Decimal,
+        side: PositionSide,
+    ) -> Decimal:
+        """Return a TP1 that stays strictly before the model's TP2.
+
+        The portfolio compiler intentionally leaves TP2 under model control.  A
+        model target can nevertheless land exactly on the mechanical 1R level
+        (or closer than 1R), which would make ``ExecutionIntent`` invalid and
+        freeze the whole cycle.  Keep TP2 unchanged and place TP1 halfway
+        between entry and TP2 whenever the normal 1R target would collide.
+        """
+
+        if side == PositionSide.LONG and target_price <= entry:
+            raise ExchangeError("portfolio entry target is not profitable for side")
+        if side == PositionSide.SHORT and target_price >= entry:
+            raise ExchangeError("portfolio entry target is not profitable for side")
+        risk = abs(entry - stop_price)
+        if risk <= 0:
+            raise ExchangeError("portfolio entry stop distance is invalid")
+        mechanical = entry + risk if side == PositionSide.LONG else entry - risk
+        if (side == PositionSide.LONG and mechanical < target_price) or (
+            side == PositionSide.SHORT and mechanical > target_price
+        ):
+            return mechanical
+        midpoint = entry + (target_price - entry) / Decimal("2")
+        if side == PositionSide.LONG and not entry < midpoint < target_price:
+            raise ExchangeError("portfolio entry target leaves no valid TP1")
+        if side == PositionSide.SHORT and not target_price < midpoint < entry:
+            raise ExchangeError("portfolio entry target leaves no valid TP1")
+        return midpoint
 
     async def _refresh_after_exit(
         self,
@@ -1134,7 +1226,12 @@ class TradingCycle:
         )
         tp1 = None if position.tp1_completed else position.tp1_price
         if tp1 is None and not position.tp1_completed:
-            tp1 = entry + risk if position.side == PositionSide.LONG else entry - risk
+            tp1 = self._safe_first_take_profit(
+                entry=entry,
+                stop_price=action.stop_price or position.stop_price,
+                target_price=target,
+                side=position.side,
+            )
         intent_id = uuid5(
             NAMESPACE_URL,
             f"portfolio-protection:{decision_id}:{action.action_id}",
@@ -1195,7 +1292,13 @@ class TradingCycle:
             if unknown_status
             else SystemMode.PAUSED
         )
-        reason = f"execution failure: {type(error).__name__}"
+        # This is surfaced to the operator in Settings/audit.  Include enough
+        # context to identify the failed action without carrying a stack trace
+        # or any request credentials into the stored mode reason.
+        detail = " ".join(str(error).split())[:300]
+        reason = f"execution failure: {type(error).__name__}; symbol={symbol}"
+        if detail:
+            reason += f"; detail={detail}"
         try:
             await self.exchange.cancel_all_entry_orders()
         except Exception as cancel_error:
@@ -1615,6 +1718,12 @@ class TradingCycle:
             correlation_limit=Decimal(str(self.settings.correlation_limit)),
             min_stop_atr=Decimal(str(self.settings.min_stop_atr)),
             max_stop_atr=Decimal(str(self.settings.max_stop_atr)),
+            manual_exit_levels_enabled=self.settings.manual_exit_levels_enabled,
+            manual_stop_atr=Decimal(str(self.settings.manual_stop_atr)),
+            manual_take_profit_atr=Decimal(str(self.settings.manual_take_profit_atr)),
+            model_primary_portfolio_enabled=self.settings.model_primary_portfolio_enabled,
+            strong_trend_entry_override_enabled=self.settings.strong_trend_entry_override_enabled,
+            strong_trend_adx_min=Decimal(str(self.settings.strong_trend_adx_min)),
             min_confidence=Decimal(str(self.settings.min_confidence)),
             min_net_reward_risk=Decimal(str(self.settings.min_net_reward_risk)),
             entry_direction=self.settings.entry_direction,

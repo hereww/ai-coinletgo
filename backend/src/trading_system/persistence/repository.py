@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -57,6 +57,7 @@ REASON_LABELS_ZH: dict[str, str] = {
     "atr_invalid": "ATR无效，无法计算止损距离",
     "trend_not_aligned": "1小时与4小时趋势未对齐",
     "no_aligned_entry_trigger": "没有符合策略的入场触发",
+    "strong_trend_entry_override": "强劲上升趋势策略放行（仅保留硬资金安全检查）",
     "model_returned_no_trade": "模型判断暂不交易",
     "signal_expired": "信号已过期",
     "signal_snapshot_symbol_mismatch": "信号与行情合约不一致",
@@ -932,9 +933,47 @@ class Repository:
                     record.updated_at = datetime.now(UTC)
             await session.commit()
 
-    async def save_income_ledger(self, rows: list[dict[str, object]]) -> None:
+    def _income_ledger_window(self, start_date: date, end_date: date) -> tuple[datetime, datetime]:
+        timezone = ZoneInfo(self.timezone_name)
+        start = datetime(
+            start_date.year,
+            start_date.month,
+            start_date.day,
+            tzinfo=timezone,
+        ).astimezone(UTC)
+        end_day = end_date + timedelta(days=1)
+        end = datetime(
+            end_day.year,
+            end_day.month,
+            end_day.day,
+            tzinfo=timezone,
+        ).astimezone(UTC)
+        return start, end
+
+    @staticmethod
+    def _income_event_time(record: IncomeLedgerRecord) -> datetime:
+        event_time = record.event_time
+        return event_time if event_time.tzinfo is not None else event_time.replace(tzinfo=UTC)
+
+    async def _income_ledger_records(
+        self, start_date: date, end_date: date
+    ) -> list[IncomeLedgerRecord]:
+        start, end = self._income_ledger_window(start_date, end_date)
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(IncomeLedgerRecord)
+                .where(
+                    IncomeLedgerRecord.event_time >= start,
+                    IncomeLedgerRecord.event_time < end,
+                )
+                .order_by(desc(IncomeLedgerRecord.event_time), desc(IncomeLedgerRecord.id))
+            )
+            return list(result.scalars())
+
+    async def save_income_ledger(self, rows: list[dict[str, object]]) -> int:
         if not rows:
-            return
+            return 0
+        inserted = 0
         async with self.database.sessions() as session:
             for row in rows:
                 income_id = str(row["income_id"])
@@ -958,7 +997,129 @@ class Repository:
                         payload=payload,
                     )
                 )
+                inserted += 1
             await session.commit()
+        return inserted
+
+    async def list_income_ledger(
+        self, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        records = await self._income_ledger_records(start_date, end_date)
+        return [
+            {
+                "income_id": record.id,
+                "symbol": record.symbol,
+                "income_type": record.income_type,
+                "income": str(record.income),
+                "asset": record.asset,
+                "trade_id": record.trade_id,
+                "event_time": self._income_event_time(record),
+            }
+            for record in records
+        ]
+
+    async def list_daily_pnl(
+        self, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        records = await self._income_ledger_records(start_date, end_date)
+        supported_types = {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
+        timezone = ZoneInfo(self.timezone_name)
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for record in records:
+            if record.income_type not in supported_types:
+                continue
+            local_date = self._income_event_time(record).astimezone(timezone).date().isoformat()
+            key = (local_date, record.asset)
+            row = grouped.setdefault(
+                key,
+                {
+                    "date": local_date,
+                    "asset": record.asset,
+                    "realized_pnl": Decimal("0"),
+                    "commission": Decimal("0"),
+                    "funding_fee": Decimal("0"),
+                    "event_count": 0,
+                },
+            )
+            if record.income_type == "REALIZED_PNL":
+                row["realized_pnl"] += record.income
+            elif record.income_type == "COMMISSION":
+                row["commission"] += record.income
+            else:
+                row["funding_fee"] += record.income
+            row["event_count"] += 1
+        result: list[dict[str, Any]] = []
+        for row in grouped.values():
+            realized = row["realized_pnl"]
+            commission = row["commission"]
+            funding = row["funding_fee"]
+            result.append(
+                {
+                    "date": row["date"],
+                    "asset": row["asset"],
+                    "realized_pnl": str(realized),
+                    "commission": str(commission),
+                    "funding_fee": str(funding),
+                    "net_pnl": str(realized + commission + funding),
+                    "event_count": row["event_count"],
+                }
+            )
+        return sorted(result, key=lambda row: (row["date"], row["asset"]), reverse=True)
+
+    async def list_trade_pnl(
+        self, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        records = await self._income_ledger_records(start_date, end_date)
+        supported_types = {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
+        grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for record in records:
+            if record.income_type not in supported_types or not record.trade_id:
+                continue
+            key = (record.symbol, record.trade_id, record.asset)
+            event_time = self._income_event_time(record)
+            row = grouped.setdefault(
+                key,
+                {
+                    "symbol": record.symbol,
+                    "trade_id": record.trade_id,
+                    "asset": record.asset,
+                    "realized_pnl": Decimal("0"),
+                    "commission": Decimal("0"),
+                    "funding_fee": Decimal("0"),
+                    "event_count": 0,
+                    "first_event_at": event_time,
+                    "last_event_at": event_time,
+                },
+            )
+            if record.income_type == "REALIZED_PNL":
+                row["realized_pnl"] += record.income
+            elif record.income_type == "COMMISSION":
+                row["commission"] += record.income
+            else:
+                row["funding_fee"] += record.income
+            row["event_count"] += 1
+            row["first_event_at"] = min(row["first_event_at"], event_time)
+            row["last_event_at"] = max(row["last_event_at"], event_time)
+        result: list[dict[str, Any]] = []
+        for row in grouped.values():
+            realized = row["realized_pnl"]
+            commission = row["commission"]
+            funding = row["funding_fee"]
+            result.append(
+                {
+                    "symbol": row["symbol"],
+                    "trade_id": row["trade_id"],
+                    "asset": row["asset"],
+                    "realized_pnl": str(realized),
+                    "commission": str(commission),
+                    "funding_fee": str(funding),
+                    "net_pnl": str(realized + commission + funding),
+                    "event_count": row["event_count"],
+                    "first_event_at": row["first_event_at"],
+                    "last_event_at": row["last_event_at"],
+                }
+            )
+        return sorted(result, key=lambda row: row["last_event_at"], reverse=True)
 
     async def sync_positions(self, positions: list[PositionState]) -> None:
         active_ids = {position.position_id for position in positions}

@@ -200,6 +200,11 @@ class ReplayService:
                 "min_net_reward_risk": Decimal(str(settings.min_net_reward_risk)),
                 "min_stop_atr": minimum_stop,
                 "max_stop_atr": maximum_stop,
+                "manual_exit_levels_enabled": settings.manual_exit_levels_enabled,
+                "manual_stop_atr": Decimal(str(settings.manual_stop_atr)),
+                "manual_take_profit_atr": Decimal(str(settings.manual_take_profit_atr)),
+                "strong_trend_entry_override_enabled": settings.strong_trend_entry_override_enabled,
+                "strong_trend_adx_min": Decimal(str(settings.strong_trend_adx_min)),
                 "trend_adx_min": Decimal(str(settings.trend_adx_min)),
                 "volatility_soft_limit_percentile": Decimal(
                     str(settings.volatility_soft_limit_percentile)
@@ -237,6 +242,9 @@ class ReplayService:
             "min_net_reward_risk",
             "min_stop_atr",
             "max_stop_atr",
+            "manual_stop_atr",
+            "manual_take_profit_atr",
+            "strong_trend_adx_min",
             "trend_adx_min",
             "volatility_soft_limit_percentile",
             "volatility_hard_limit_percentile",
@@ -286,6 +294,11 @@ class ReplayService:
             min_net_reward_risk=cast(Decimal, base["min_net_reward_risk"]),
             min_stop_atr=cast(Decimal, base["min_stop_atr"]),
             max_stop_atr=cast(Decimal, base["max_stop_atr"]),
+            manual_exit_levels_enabled=bool(base["manual_exit_levels_enabled"]),
+            manual_stop_atr=cast(Decimal, base["manual_stop_atr"]),
+            manual_take_profit_atr=cast(Decimal, base["manual_take_profit_atr"]),
+            strong_trend_entry_override_enabled=bool(base["strong_trend_entry_override_enabled"]),
+            strong_trend_adx_min=cast(Decimal, base["strong_trend_adx_min"]),
             trend_adx_min=cast(Decimal, base["trend_adx_min"]),
             volatility_soft_limit_percentile=cast(
                 Decimal, base["volatility_soft_limit_percentile"]
@@ -306,6 +319,8 @@ class ReplayService:
             raise ValueError("stop_atr cannot be below min_stop_atr")
         if config.stop_atr > config.max_stop_atr:
             raise ValueError("stop_atr cannot exceed max_stop_atr")
+        if config.manual_exit_levels_enabled and config.manual_stop_atr > config.max_stop_atr:
+            raise ValueError("manual_stop_atr cannot exceed max_stop_atr")
         if config.volatility_soft_limit_percentile > config.volatility_hard_limit_percentile:
             raise ValueError(
                 "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"

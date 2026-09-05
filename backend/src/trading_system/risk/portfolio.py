@@ -183,6 +183,15 @@ class PortfolioCompiler:
         for allocation, action in sorted(
             increases, key=lambda item: (item[0].priority, -item[0].confidence, item[0].symbol)
         ):
+            strong_trend_override = self._strong_uptrend_override(
+                allocation, snapshots[action.symbol], limits
+            )
+            if strong_trend_override and "strong_trend_entry_override" not in action.reasons:
+                action = action.model_copy(
+                    update={
+                        "reasons": [*action.reasons, "strong_trend_entry_override"]
+                    }
+                )
             validation = (
                 "system_mode_disallows_risk_increase"
                 if risk_increase_blocked
@@ -199,7 +208,14 @@ class PortfolioCompiler:
             if validation is None and approved_risk + action.target_risk_usdt > risk_cap:
                 validation = "portfolio_risk_capacity_exhausted"
             if validation is None and cooldown_active:
-                validation = "rebalance_cooldown_active"
+                # In model-primary mode the model owns the opportunity and
+                # target-risk decision.  A time-based rebalance gate is not a
+                # liquidation safeguard and must not veto a valid model ADD;
+                # hard portfolio, margin, balance, stop and breaker limits
+                # remain enforced below.  Keep the cooldown for the legacy
+                # rule-based mode only.
+                if not limits.model_primary_portfolio_enabled and not strong_trend_override:
+                    validation = "rebalance_cooldown_active"
             if validation is not None:
                 reductions.append(self._rejected(allocation, validation, source=action))
                 continue
@@ -401,21 +417,31 @@ class PortfolioCompiler:
         risk_cap: Decimal,
         limits: RiskLimits,
     ) -> PortfolioPlanAction:
-        if allocation.confidence < limits.min_confidence:
+        allocation = self._apply_manual_exit_levels(allocation, snapshot, limits)
+        strong_trend_override = self._strong_uptrend_override(allocation, snapshot, limits)
+        model_primary = limits.model_primary_portfolio_enabled
+        if (
+            allocation.confidence < limits.min_confidence
+            and not model_primary
+            and not strong_trend_override
+        ):
             return self._rejected(allocation, "confidence_below_minimum")
         if not self._direction_allowed(allocation.target_side, limits):
             return self._rejected(allocation, "entry_direction_not_allowed")
-        if not self._trend_matches_target(allocation.target_side, snapshot):
-            return self._rejected(allocation, "trend_not_aligned")
-        if snapshot.market_regime != "TRENDING":
-            return self._rejected(allocation, "market_regime_not_trending")
-        if snapshot.adx_1h < limits.trend_adx_min:
-            return self._rejected(allocation, "trend_strength_below_minimum")
+        if not model_primary:
+            if not self._trend_matches_target(allocation.target_side, snapshot):
+                return self._rejected(allocation, "trend_not_aligned")
+            if snapshot.market_regime != "TRENDING":
+                return self._rejected(allocation, "market_regime_not_trending")
+            if snapshot.adx_1h < limits.trend_adx_min:
+                return self._rejected(allocation, "trend_strength_below_minimum")
         if snapshot.volatility_risk_multiplier <= 0:
             return self._rejected(allocation, "invalid_volatility_risk_multiplier")
-        if not self._entry_trigger_matches(
+        trigger_matches = self._entry_trigger_matches(
             allocation.target_side, snapshot, limits.entry_trigger
-        ):
+        )
+        trigger_override = not trigger_matches and strong_trend_override
+        if not model_primary and not trigger_matches and not trigger_override:
             return self._rejected(allocation, "no_aligned_entry_trigger")
         if not self._valid_geometry(allocation, snapshot):
             return self._rejected(allocation, "invalid_price_geometry")
@@ -433,7 +459,11 @@ class PortfolioCompiler:
         if stop_atr > limits.max_stop_atr:
             return self._rejected(allocation, "stop_too_far")
         net_rr = self._net_reward_risk(entry, allocation, snapshot)
-        if net_rr < limits.min_net_reward_risk:
+        if (
+            net_rr < limits.min_net_reward_risk
+            and not model_primary
+            and not strong_trend_override
+        ):
             return self._rejected(allocation, "net_reward_risk_below_minimum")
         target_risk = risk_cap * allocation.allocation_fraction
         target_risk *= snapshot.volatility_risk_multiplier
@@ -444,6 +474,11 @@ class PortfolioCompiler:
             return self._rejected(allocation, "quantity_below_exchange_minimum")
         if quantity * entry < exchange_filters.min_notional:
             return self._rejected(allocation, "notional_below_exchange_minimum")
+        approval_reasons = ["portfolio_target_approved"]
+        if model_primary:
+            approval_reasons.append("model_primary_opportunity_accepted")
+        if strong_trend_override:
+            approval_reasons.append("strong_trend_entry_override")
         return PortfolioPlanAction(
             action_id=allocation.allocation_id,
             allocation_id=allocation.allocation_id,
@@ -459,7 +494,7 @@ class PortfolioCompiler:
             target_price=allocation.target_price,
             confidence=allocation.confidence,
             priority=allocation.priority,
-            reasons=["portfolio_target_approved"],
+            reasons=approval_reasons,
         )
 
     def _validate_increase(
@@ -474,9 +509,16 @@ class PortfolioCompiler:
     ) -> str | None:
         if action.side is None or action.stop_price is None:
             return "invalid_portfolio_action"
+        snapshot = snapshots[action.symbol]
+        model_primary = limits.model_primary_portfolio_enabled
+        strong_trend_override = self._strong_uptrend_override(
+            allocation, snapshot, limits
+        )
         if (
             action.action == PortfolioPlanActionType.ADD
             and allocation.confidence < limits.min_confidence
+            and not model_primary
+            and not strong_trend_override
         ):
             return "confidence_below_minimum"
         if action.action == PortfolioPlanActionType.ADD and not self._valid_geometry(
@@ -486,17 +528,21 @@ class PortfolioCompiler:
         ):
             return "invalid_price_geometry"
         if action.action == PortfolioPlanActionType.ADD:
-            snapshot = snapshots[action.symbol]
-            if not self._trend_matches_target(allocation.target_side, snapshot):
-                return "trend_not_aligned"
-            if snapshot.market_regime != "TRENDING":
-                return "market_regime_not_trending"
-            if snapshot.adx_1h < limits.trend_adx_min:
-                return "trend_strength_below_minimum"
+            if not model_primary:
+                if not self._trend_matches_target(allocation.target_side, snapshot):
+                    return "trend_not_aligned"
+                if snapshot.market_regime != "TRENDING":
+                    return "market_regime_not_trending"
+                if snapshot.adx_1h < limits.trend_adx_min:
+                    return "trend_strength_below_minimum"
             if snapshot.volatility_risk_multiplier <= 0:
                 return "invalid_volatility_risk_multiplier"
-            if not self._entry_trigger_matches(
-                allocation.target_side, snapshot, limits.entry_trigger
+            if (
+                not model_primary
+                and not self._entry_trigger_matches(
+                    allocation.target_side, snapshot, limits.entry_trigger
+                )
+                and not self._strong_uptrend_override(allocation, snapshot, limits)
             ):
                 return "no_aligned_entry_trigger"
             reference = self._reference_price(action, snapshot)
@@ -509,9 +555,15 @@ class PortfolioCompiler:
             if allocation.target_price is None:
                 return "invalid_price_geometry"
             reward = abs(allocation.target_price - reference)
-            costs = reference * Decimal("0.0015") + reference * abs(snapshot.funding_rate)
+            costs = reference * self._estimated_round_trip_cost_rate() + reference * abs(
+                snapshot.funding_rate
+            )
             net_rr = max(Decimal("0"), reward - costs) / (stop_distance + costs)
-            if net_rr < limits.min_net_reward_risk:
+            if (
+                net_rr < limits.min_net_reward_risk
+                and not model_primary
+                and not strong_trend_override
+            ):
                 return "net_reward_risk_below_minimum"
         position_count = len(projected) + (
             1 if action.action == PortfolioPlanActionType.OPEN else 0
@@ -522,14 +574,17 @@ class PortfolioCompiler:
         if (
             action.action == PortfolioPlanActionType.OPEN
             and same_direction >= limits.max_same_direction
+            and not model_primary
+            and not strong_trend_override
         ):
             return "same_direction_limit_reached"
-        for symbol in projected:
-            if symbol == action.symbol:
-                continue
-            correlation = abs(self._correlation(action.symbol, symbol, correlations))
-            if correlation > limits.correlation_limit:
-                return f"correlated_with_{symbol}"
+        if not model_primary and not strong_trend_override:
+            for symbol in projected:
+                if symbol == action.symbol:
+                    continue
+                correlation = abs(self._correlation(action.symbol, symbol, correlations))
+                if correlation > limits.correlation_limit:
+                    return f"correlated_with_{symbol}"
         projected_margin = sum(
             (
                 item.quantity * item.mark_price / Decimal(limits.max_leverage)
@@ -610,6 +665,21 @@ class PortfolioCompiler:
             return snapshot.pullback_15m == direction
         return (
             snapshot.breakout_15m == direction or snapshot.pullback_15m == direction
+        )
+
+    @staticmethod
+    def _strong_uptrend_override(
+        allocation: PortfolioAllocation,
+        snapshot: MarketSnapshot,
+        limits: RiskLimits,
+    ) -> bool:
+        return (
+            allocation.target_side == PortfolioTargetSide.LONG
+            and limits.strong_trend_entry_override_enabled
+            and snapshot.market_regime == "TRENDING"
+            and snapshot.trend_1h == 1
+            and snapshot.trend_4h == 1
+            and snapshot.adx_1h >= limits.strong_trend_adx_min
         )
 
     @staticmethod
@@ -703,9 +773,58 @@ class PortfolioCompiler:
         assert allocation.target_price is not None
         distance = abs(entry - allocation.stop_price)
         reward = abs(allocation.target_price - entry)
-        costs = entry * (Decimal("0.0015"))
+        costs = entry * self._estimated_round_trip_cost_rate()
         funding = entry * abs(snapshot.funding_rate)
         return max(Decimal("0"), reward - costs - funding) / (distance + costs + funding)
+
+    @staticmethod
+    def _estimated_round_trip_cost_rate() -> Decimal:
+        """Conservative fee + slippage allowance used by portfolio checks."""
+
+        return Decimal("0.0015")
+
+    @staticmethod
+    def _apply_manual_exit_levels(
+        allocation: PortfolioAllocation,
+        snapshot: MarketSnapshot,
+        limits: RiskLimits,
+    ) -> PortfolioAllocation:
+        """Replace model exits for new entries with operator ATR settings.
+
+        The configured stop is treated as a minimum distance from the adverse
+        edge of the permitted entry range. A tiny structural buffer keeps the
+        stop outside the whole range even when a model submits a wide range.
+        Existing positions are handled separately and never have their stop
+        widened by this path.
+        """
+
+        if not limits.manual_exit_levels_enabled:
+            return allocation
+        if allocation.target_side == PortfolioTargetSide.FLAT:
+            return allocation
+        if allocation.entry_min is None or allocation.entry_max is None:
+            return allocation
+        atr = snapshot.atr_15m
+        if atr <= 0:
+            return allocation
+        structural_buffer = atr * Decimal("0.01")
+        stop_distance = atr * limits.manual_stop_atr
+        target_distance = atr * limits.manual_take_profit_atr
+        if allocation.target_side == PortfolioTargetSide.LONG:
+            stop = min(
+                allocation.entry_min - structural_buffer,
+                allocation.entry_max - stop_distance,
+            )
+            target = allocation.entry_max + target_distance
+        else:
+            stop = max(
+                allocation.entry_max + structural_buffer,
+                allocation.entry_min + stop_distance,
+            )
+            target = allocation.entry_min - target_distance
+        if stop <= 0 or target <= 0:
+            return allocation
+        return allocation.model_copy(update={"stop_price": stop, "target_price": target})
 
     @staticmethod
     def _reference_price(action: PortfolioPlanAction, snapshot: MarketSnapshot) -> Decimal:

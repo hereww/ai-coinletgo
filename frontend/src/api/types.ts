@@ -162,6 +162,12 @@ export interface RiskConfig {
   min_net_reward_risk: number
   min_stop_atr: number
   max_stop_atr: number
+  manual_exit_levels_enabled: boolean
+  manual_stop_atr: number
+  manual_take_profit_atr: number
+  model_primary_portfolio_enabled: boolean
+  strong_trend_entry_override_enabled: boolean
+  strong_trend_adx_min: number
   trend_adx_min?: number
   volatility_soft_limit_percentile?: number
   volatility_hard_limit_percentile?: number
@@ -173,6 +179,18 @@ export interface RiskConfig {
   portfolio_strategy_enabled: boolean
   portfolio_rebalance_deadband_fraction: number
   portfolio_rebalance_cooldown_minutes: number
+  hft_enabled: boolean
+  hft_dry_run: boolean
+  hft_symbols: string[]
+  hft_event_interval_ms: number
+  hft_max_spread_pct: number
+  hft_min_depth_usdt: number
+  hft_order_notional_usdt: number
+  hft_max_inventory_usdt: number
+  hft_cooldown_seconds: number
+  hft_market_stale_seconds: number
+  hft_max_consecutive_losses: number
+  hft_imbalance_threshold: number
 }
 
 export interface PortfolioExecution {
@@ -281,6 +299,47 @@ export interface OrderRow {
   portfolio_allocation_id?: string | null
   action_sequence?: number | null
   updated_at: string
+}
+
+/** A realized-income grouping for one Binance trade identifier, not a position lifecycle. */
+export interface TradePnlRow {
+  symbol: string
+  trade_id: string
+  asset: string
+  realized_pnl: string
+  commission: string
+  funding_fee: string
+  net_pnl: string
+  event_count: number
+  first_event_at: string
+  last_event_at: string
+}
+
+export interface DailyPnlRow {
+  date: string
+  asset: string
+  realized_pnl: string
+  commission: string
+  funding_fee: string
+  net_pnl: string
+  event_count: number
+}
+
+export interface IncomeLedgerRow {
+  income_id: string
+  symbol: string
+  income_type: string
+  income: string
+  asset: string
+  trade_id: string | null
+  event_time: string
+}
+
+export interface PnlSyncResult {
+  start_date: string
+  end_date: string
+  fetched_rows: number
+  inserted_rows: number
 }
 
 export interface ReplayRun {

@@ -12,7 +12,8 @@ from redis.asyncio import Redis
 from trading_system.ai.client import ResponsesModelClient
 from trading_system.config import get_settings
 from trading_system.exchange.binance import BinanceUSDMarketClient
-from trading_system.exchange.market_stream import BinanceUserDataStream
+from trading_system.exchange.market_stream import BinanceMarketStream, BinanceUserDataStream
+from trading_system.hft.runner import HftRunner
 from trading_system.notifications.reports import TelegramReportScheduler
 from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.orchestration.cycle import TradingCycle
@@ -99,6 +100,34 @@ async def run_worker() -> None:
         if user_stream is not None
         else None
     )
+    hft_stream = (
+        BinanceMarketStream(
+            settings.binance_ws_url,
+            proxy_url=settings.binance_http_proxy_url,
+        )
+        if settings.hft_enabled
+        and settings.binance_environment == "testnet"
+        and exchange.configured
+        and (not settings.binance_proxy_enabled or settings.binance_http_proxy_configured)
+        else None
+    )
+    hft_runner = (
+        HftRunner(settings, hft_stream, exchange, redis)
+        if hft_stream is not None
+        else None
+    )
+    hft_task = (
+        asyncio.create_task(
+            _supervise(
+                "hft-shadow-runner",
+                hft_runner.run_forever,
+                notifier,
+            ),
+            name="supervisor-hft-shadow-runner",
+        )
+        if hft_runner is not None
+        else None
+    )
     first_cycle = True
     try:
         while True:
@@ -129,6 +158,10 @@ async def run_worker() -> None:
             user_stream_task.cancel()
         if user_stream_heartbeat_task is not None:
             user_stream_heartbeat_task.cancel()
+        if hft_runner is not None:
+            hft_runner.stop()
+        if hft_task is not None:
+            hft_task.cancel()
         heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await protection_task
@@ -140,6 +173,9 @@ async def run_worker() -> None:
         if user_stream_heartbeat_task is not None:
             with suppress(asyncio.CancelledError):
                 await user_stream_heartbeat_task
+        if hft_task is not None:
+            with suppress(asyncio.CancelledError):
+                await hft_task
         with suppress(asyncio.CancelledError):
             await heartbeat_task
         if user_stream is not None:

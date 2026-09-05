@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote, urlparse
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 RUNTIME_CONFIG_FIELDS = frozenset(
     {
@@ -33,6 +33,12 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "min_net_reward_risk",
         "min_stop_atr",
         "max_stop_atr",
+        "manual_exit_levels_enabled",
+        "manual_stop_atr",
+        "manual_take_profit_atr",
+        "model_primary_portfolio_enabled",
+        "strong_trend_entry_override_enabled",
+        "strong_trend_adx_min",
         "trend_adx_min",
         "volatility_soft_limit_percentile",
         "volatility_hard_limit_percentile",
@@ -43,6 +49,18 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "portfolio_strategy_enabled",
         "portfolio_rebalance_deadband_fraction",
         "portfolio_rebalance_cooldown_minutes",
+        "hft_enabled",
+        "hft_dry_run",
+        "hft_symbols",
+        "hft_event_interval_ms",
+        "hft_max_spread_pct",
+        "hft_min_depth_usdt",
+        "hft_order_notional_usdt",
+        "hft_max_inventory_usdt",
+        "hft_cooldown_seconds",
+        "hft_market_stale_seconds",
+        "hft_max_consecutive_losses",
+        "hft_imbalance_threshold",
     }
 )
 
@@ -131,7 +149,23 @@ class Settings(BaseSettings):
     max_same_direction: int = Field(default=2, ge=1)
     correlation_limit: float = Field(default=0.80, ge=0, le=1)
     min_stop_atr: float = Field(default=0.80, gt=0)
-    max_stop_atr: float = Field(default=2.50, gt=0)
+    max_stop_atr: float = Field(default=4.00, gt=0)
+    # When enabled, new portfolio entries use these deterministic ATR-based
+    # exits instead of trusting model-proposed absolute prices. Existing
+    # positions keep their current stop and are never widened automatically.
+    manual_exit_levels_enabled: bool = False
+    manual_stop_atr: float = Field(default=1.80, gt=0, le=10)
+    manual_take_profit_atr: float = Field(default=5.00, gt=0, le=20)
+    # Testnet can delegate opportunity selection to the model.  The risk
+    # compiler still owns hard stops, sizing, margin/balance checks, exchange
+    # constraints, system mode, and circuit breakers.
+    model_primary_portfolio_enabled: bool = True
+    # Testnet may bypass ordinary opportunity-policy filters when both higher
+    # timeframes show a strong uptrend. Hard stop geometry, portfolio risk,
+    # margin/balance, total positions, exchange constraints and circuit
+    # breakers remain mandatory.
+    strong_trend_entry_override_enabled: bool = True
+    strong_trend_adx_min: float = Field(default=30.0, ge=0)
     trend_adx_min: float = Field(default=20.0, ge=0)
     volatility_soft_limit_percentile: float = Field(default=0.75, ge=0, le=1)
     volatility_hard_limit_percentile: float = Field(default=0.90, ge=0, le=1)
@@ -145,17 +179,29 @@ class Settings(BaseSettings):
     min_book_depth_usdt: float = 50_000.0
     universe_size: int = 30
     candidate_count: int = Field(default=8, ge=1)
-    # Five minutes is the supported minimum.  It keeps the scheduler, model
-    # cadence gate, and signal expiry in one consistent slot while allowing a
-    # responsive testnet loop.
-    scan_interval_minutes: int = Field(default=5, ge=5, le=120)
+    # The scheduler uses a small, explicit cadence set so model expiry and
+    # operator expectations remain predictable.
+    scan_interval_minutes: Literal[5, 15, 30, 60] = 5
     min_listing_days: int = 90
-    # Portfolio-v1 is opt-in and may only execute on testnet.  Keeping it
-    # disabled by default preserves the established signal-v1 behavior until
-    # the operator has completed the testnet acceptance checklist.
-    portfolio_strategy_enabled: bool = False
+    # Portfolio-v1 and HFT are testnet-only features. HFT defaults to shadow
+    # execution: it consumes the live depth stream but never submits orders.
+    portfolio_strategy_enabled: bool = True
     portfolio_rebalance_deadband_fraction: float = Field(default=0.10, ge=0, le=1)
     portfolio_rebalance_cooldown_minutes: int = Field(default=30, ge=0, le=1_440)
+    hft_enabled: bool = False
+    hft_dry_run: bool = True
+    hft_symbols: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["BTCUSDT", "ETHUSDT"], max_length=10
+    )
+    hft_event_interval_ms: int = Field(default=100, ge=50, le=5_000)
+    hft_max_spread_pct: float = Field(default=0.0008, gt=0, le=0.02)
+    hft_min_depth_usdt: float = Field(default=25_000.0, gt=0)
+    hft_order_notional_usdt: float = Field(default=50.0, gt=0)
+    hft_max_inventory_usdt: float = Field(default=250.0, gt=0)
+    hft_cooldown_seconds: int = Field(default=3, ge=0, le=3_600)
+    hft_market_stale_seconds: float = Field(default=2.0, gt=0, le=60)
+    hft_max_consecutive_losses: int = Field(default=3, ge=1, le=100)
+    hft_imbalance_threshold: float = Field(default=0.20, gt=0, lt=1)
 
     telegram_enabled: bool = False
 
@@ -176,6 +222,10 @@ class Settings(BaseSettings):
                 "max_positions": 3,
                 "candidate_count": 5,
                 "min_net_reward_risk": 2.0,
+                "max_stop_atr": 2.5,
+                "manual_exit_levels_enabled": False,
+                "model_primary_portfolio_enabled": False,
+                "strong_trend_entry_override_enabled": False,
             }
             if live
             else {
@@ -185,6 +235,10 @@ class Settings(BaseSettings):
                 "max_positions": 4,
                 "candidate_count": 8,
                 "min_net_reward_risk": 1.8,
+                "max_stop_atr": 4.0,
+                "manual_exit_levels_enabled": True,
+                "model_primary_portfolio_enabled": True,
+                "strong_trend_entry_override_enabled": True,
             }
         )
         for key, default in defaults.items():
@@ -201,6 +255,14 @@ class Settings(BaseSettings):
                 data[key] = min(int(current), int(default))
             elif key == "min_net_reward_risk":
                 data[key] = max(float(current), float(default))
+            elif key == "max_stop_atr":
+                data[key] = min(float(current), float(default))
+            elif key == "manual_exit_levels_enabled":
+                data[key] = False
+            elif key == "model_primary_portfolio_enabled":
+                data[key] = False
+            elif key == "strong_trend_entry_override_enabled":
+                data[key] = False
             elif key in {"single_trade_risk_pct", "portfolio_risk_pct"}:
                 data[key] = min(float(current), float(default))
         return data
@@ -209,6 +271,8 @@ class Settings(BaseSettings):
     def enforce_live_security(self) -> Settings:
         if self.min_stop_atr > self.max_stop_atr:
             raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if self.manual_exit_levels_enabled and self.manual_stop_atr > self.max_stop_atr:
+            raise ValueError("manual_stop_atr cannot exceed max_stop_atr")
         if self.volatility_soft_limit_percentile > self.volatility_hard_limit_percentile:
             raise ValueError(
                 "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
@@ -230,6 +294,12 @@ class Settings(BaseSettings):
                 raise ValueError("live Binance environment caps candidate_count at 5")
             if self.max_positions > 3:
                 raise ValueError("live Binance environment caps max_positions at 3")
+            if self.manual_exit_levels_enabled:
+                raise ValueError("manual exit levels are limited to Binance testnet")
+            if self.model_primary_portfolio_enabled:
+                raise ValueError("model-primary portfolio mode is limited to Binance testnet")
+            if self.strong_trend_entry_override_enabled:
+                raise ValueError("strong trend entry override is limited to Binance testnet")
         if self.app_env == "production":
             allowed_rest_hosts = (
                 {"fapi.binance.com"}
@@ -251,8 +321,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "production Binance WebSocket URL is not an approved official endpoint"
                 )
-        if self.portfolio_strategy_enabled and self.binance_environment != "testnet":
-            raise ValueError("Portfolio-v1 strategy is limited to Binance testnet")
+        if self.binance_environment == "live":
+            if self.portfolio_strategy_enabled:
+                raise ValueError("Portfolio-v1 strategy is limited to Binance testnet")
+            if self.hft_enabled:
+                raise ValueError("HFT strategy is limited to Binance testnet")
         return self
 
     @field_validator("allowed_origins", mode="before")
@@ -280,6 +353,32 @@ class Settings(BaseSettings):
             if symbol and symbol not in normalized:
                 normalized.append(symbol)
         return normalized
+
+    @field_validator("hft_symbols", mode="before")
+    @classmethod
+    def normalize_hft_symbols(cls, value: object) -> object:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, list):
+            return value
+        normalized = []
+        for item in value:
+            symbol = str(item).strip().upper()
+            valid = symbol.isascii() and symbol.isalnum() and 5 <= len(symbol) <= 20
+            if symbol and not valid:
+                raise ValueError("hft_symbols must contain valid Binance symbols")
+            if symbol and symbol not in normalized:
+                normalized.append(symbol)
+        return normalized
+
+    @field_validator("scan_interval_minutes", mode="before")
+    @classmethod
+    def normalize_scan_interval(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return value
 
     def read_secret(self, name: str) -> str | None:
         path = self.secret_dir / name

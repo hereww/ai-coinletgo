@@ -88,6 +88,7 @@ def test_live_password_is_fail_closed_even_if_auth_flag_is_mutated(tmp_path: obj
         auth_required=True,
         cookie_secure=True,
         binance_environment="live",
+        portfolio_strategy_enabled=False,
     )
     service = SecurityService(settings)
     settings.auth_required = False

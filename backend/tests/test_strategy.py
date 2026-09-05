@@ -150,6 +150,15 @@ def test_screener_honors_configured_entry_trigger() -> None:
     assert "no_aligned_entry_trigger" in reasons
 
 
+def test_screener_allows_strong_uptrend_without_15m_trigger_when_enabled() -> None:
+    eligible, reasons = MarketScreener(
+        strong_trend_entry_override_enabled=True,
+        strong_trend_adx_min=Decimal("30"),
+    ).eligible(snapshot(breakout_15m=0, pullback_15m=0))
+    assert eligible is True
+    assert reasons == []
+
+
 @pytest.mark.asyncio
 async def test_cycle_status_marks_partial_execution_failure_before_executed() -> None:
     class Redis:

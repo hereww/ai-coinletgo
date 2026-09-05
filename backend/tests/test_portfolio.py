@@ -119,6 +119,194 @@ def test_compiler_applies_snapshot_volatility_risk_multiplier() -> None:
     assert reduced.actions[0].target_risk_usdt < full.actions[0].target_risk_usdt
 
 
+def test_compiler_allows_strong_uptrend_long_without_15m_trigger() -> None:
+    limits = context().limits.model_copy(
+        update={"strong_trend_entry_override_enabled": True, "strong_trend_adx_min": 30}
+    )
+    plan = PortfolioCompiler().compile(
+        decision(allocation()),
+        snapshots={"BTCUSDT": snapshot(breakout_15m=0, pullback_15m=0)},
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=limits,
+        mode=SystemMode.TESTNET,
+    )
+    assert plan.status == PortfolioPlanStatus.APPROVED
+    assert plan.actions[0].action == PortfolioPlanActionType.OPEN
+    assert "strong_trend_entry_override" in plan.actions[0].reasons
+
+
+def test_model_primary_accepts_opportunity_without_indicator_gates() -> None:
+    limits = context().limits.model_copy(
+        update={"model_primary_portfolio_enabled": True, "min_net_reward_risk": 3}
+    )
+    plan = PortfolioCompiler().compile(
+        decision(
+            allocation(
+                confidence=Decimal("0.1"),
+                target_price=Decimal("100.2"),
+            )
+        ),
+        snapshots={
+            "BTCUSDT": snapshot(
+                market_regime="RANGING",
+                trend_1h=-1,
+                trend_4h=-1,
+                adx_1h=Decimal("5"),
+                breakout_15m=0,
+                pullback_15m=0,
+            )
+        },
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=limits,
+        mode=SystemMode.TESTNET,
+    )
+    assert plan.status == PortfolioPlanStatus.APPROVED
+    assert plan.actions[0].action == PortfolioPlanActionType.OPEN
+    assert "model_primary_opportunity_accepted" in plan.actions[0].reasons
+
+
+def test_model_primary_does_not_block_model_add_with_cooldown() -> None:
+    limits = context().limits.model_copy(update={"model_primary_portfolio_enabled": True})
+    current = position(
+        symbol="BTCUSDT",
+        quantity=Decimal("1"),
+        initial_quantity=Decimal("1"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        original_stop_price=Decimal("98"),
+        initial_risk_usdt=Decimal("1"),
+    )
+    plan = PortfolioCompiler().compile(
+        decision(
+            allocation(
+                allocation_fraction=Decimal("1"),
+                stop_price=Decimal("98"),
+                target_price=Decimal("106"),
+            )
+        ),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=limits,
+        mode=SystemMode.TESTNET,
+        last_rebalance_at=datetime.now(UTC),
+        cooldown_minutes=30,
+    )
+    assert plan.actions[0].action == PortfolioPlanActionType.ADD
+    assert all("rebalance_cooldown_active" not in item.reasons for item in plan.actions)
+
+
+def test_compiler_strong_uptrend_bypasses_opportunity_filters() -> None:
+    limits = context().limits.model_copy(
+        update={
+            "strong_trend_entry_override_enabled": True,
+            "strong_trend_adx_min": Decimal("30"),
+            "min_confidence": Decimal("0.75"),
+            "min_net_reward_risk": Decimal("2"),
+            "max_same_direction": 1,
+            "correlation_limit": Decimal("0.1"),
+        }
+    )
+    current = position(
+        symbol="ETHUSDT",
+        quantity=Decimal("0.5"),
+        initial_quantity=Decimal("0.5"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        original_stop_price=Decimal("98"),
+        initial_risk_usdt=Decimal("1"),
+    )
+    keep_eth = allocation(
+        "ETHUSDT",
+        allocation_fraction=Decimal("0.13"),
+        stop_price=Decimal("98"),
+        target_price=Decimal("106"),
+    )
+    aggressive_btc = allocation(
+        confidence=Decimal("0.1"),
+        stop_price=Decimal("99"),
+        target_price=Decimal("100.2"),
+    )
+    now = datetime.now(UTC)
+
+    plan = PortfolioCompiler().compile(
+        decision(keep_eth, aggressive_btc),
+        snapshots={
+            "BTCUSDT": snapshot(breakout_15m=0, pullback_15m=0),
+            "ETHUSDT": snapshot(symbol="ETHUSDT"),
+        },
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=limits,
+        mode=SystemMode.TESTNET,
+        correlations={("BTCUSDT", "ETHUSDT"): Decimal("0.99")},
+        last_rebalance_at=now,
+        cooldown_minutes=30,
+        now=now,
+    )
+
+    btc_action = next(item for item in plan.actions if item.symbol == "BTCUSDT")
+    assert btc_action.action == PortfolioPlanActionType.OPEN
+    assert "strong_trend_entry_override" in btc_action.reasons
+
+
+def test_compiler_strong_uptrend_keeps_available_balance_guard() -> None:
+    limits = context().limits.model_copy(
+        update={"strong_trend_entry_override_enabled": True}
+    )
+    account = context().account.model_copy(update={"available_balance": Decimal("0")})
+    plan = PortfolioCompiler().compile(
+        decision(allocation(confidence=Decimal("0.1"))),
+        snapshots={"BTCUSDT": snapshot(breakout_15m=0, pullback_15m=0)},
+        account=account,
+        positions=[],
+        filters=filters(),
+        limits=limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    assert plan.actions[0].action == PortfolioPlanActionType.REJECTED
+    assert "available_balance_insufficient" in plan.actions[0].reasons
+
+
+def test_compiler_uses_manual_atr_exits_for_new_entries() -> None:
+    limits = context().limits.model_copy(
+        update={
+            "manual_exit_levels_enabled": True,
+            "manual_stop_atr": Decimal("1.8"),
+            "manual_take_profit_atr": Decimal("5"),
+            "max_stop_atr": Decimal("4"),
+            "min_net_reward_risk": Decimal("1.8"),
+        }
+    )
+    requested = allocation(
+        stop_price=Decimal("99.5"),
+        target_price=Decimal("101"),
+    )
+    plan = PortfolioCompiler().compile(
+        decision(requested),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[],
+        filters=filters(),
+        limits=limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    action = plan.actions[0]
+    assert action.action == PortfolioPlanActionType.OPEN
+    assert action.stop_price == Decimal("98.3")
+    assert action.target_price == Decimal("105.1")
+
+
 @pytest.mark.parametrize(
     ("side", "stop_price", "target_price", "risk_entry"),
     [

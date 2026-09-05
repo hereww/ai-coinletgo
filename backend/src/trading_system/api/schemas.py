@@ -30,6 +30,21 @@ class IntegrationProbeRequest(BaseModel):
     target: Literal["testnet", "model"]
 
 
+class PnlSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_date: date
+    end_date: date
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> PnlSyncRequest:
+        if self.end_date < self.start_date:
+            raise ValueError("end_date cannot precede start_date")
+        if (self.end_date - self.start_date).days > 365:
+            raise ValueError("pnl range cannot exceed 366 days")
+        return self
+
+
 class ModelRelayUpdateRequest(BaseModel):
     base_url: str | None = Field(default=None, max_length=500)
     model_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:/-]+$")
@@ -70,11 +85,17 @@ class ConfigUpdateRequest(BaseModel):
     entry_direction: Literal["both", "long_only", "short_only"] | None = None
     entry_trigger: Literal["breakout_or_pullback", "breakout_only", "pullback_only"] | None = None
     candidate_count: int | None = Field(default=None, ge=1)
-    scan_interval_minutes: int | None = Field(default=None, ge=5, le=120)
+    scan_interval_minutes: Literal[5, 15, 30, 60] | None = None
     min_confidence: Decimal | None = Field(default=None, ge=0, le=1)
     min_net_reward_risk: Decimal | None = Field(default=None, gt=0)
     min_stop_atr: Decimal | None = Field(default=None, gt=0)
     max_stop_atr: Decimal | None = Field(default=None, gt=0)
+    manual_exit_levels_enabled: bool | None = None
+    manual_stop_atr: Decimal | None = Field(default=None, gt=0, le=10)
+    manual_take_profit_atr: Decimal | None = Field(default=None, gt=0, le=20)
+    model_primary_portfolio_enabled: bool | None = None
+    strong_trend_entry_override_enabled: bool | None = None
+    strong_trend_adx_min: Decimal | None = Field(default=None, ge=0)
     trend_adx_min: Decimal | None = Field(default=None, ge=0)
     volatility_soft_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
     volatility_hard_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
@@ -86,6 +107,18 @@ class ConfigUpdateRequest(BaseModel):
         default=None, ge=0, le=1
     )
     portfolio_rebalance_cooldown_minutes: int | None = Field(default=None, ge=0, le=1_440)
+    hft_enabled: bool | None = None
+    hft_dry_run: bool | None = None
+    hft_symbols: list[str] | None = Field(default=None, max_length=10)
+    hft_event_interval_ms: int | None = Field(default=None, ge=50, le=5_000)
+    hft_max_spread_pct: Decimal | None = Field(default=None, gt=0, le=0.02)
+    hft_min_depth_usdt: Decimal | None = Field(default=None, gt=0)
+    hft_order_notional_usdt: Decimal | None = Field(default=None, gt=0)
+    hft_max_inventory_usdt: Decimal | None = Field(default=None, gt=0)
+    hft_cooldown_seconds: int | None = Field(default=None, ge=0, le=3_600)
+    hft_market_stale_seconds: Decimal | None = Field(default=None, gt=0, le=60)
+    hft_max_consecutive_losses: int | None = Field(default=None, ge=1, le=100)
+    hft_imbalance_threshold: Decimal | None = Field(default=None, gt=0, lt=1)
     password: str = Field(default="", max_length=256)
 
     @field_validator("entry_symbols", mode="before")
@@ -107,11 +140,37 @@ class ConfigUpdateRequest(BaseModel):
                 normalized.append(symbol)
         return normalized
 
+    @field_validator("hft_symbols", mode="before")
+    @classmethod
+    def normalize_hft_symbols(cls, value: object) -> object:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, list):
+            return value
+        normalized = []
+        for item in value:
+            symbol = str(item).strip().upper()
+            valid = symbol.isascii() and symbol.isalnum() and 5 <= len(symbol) <= 20
+            if symbol and not valid:
+                raise ValueError("hft_symbols must contain valid Binance symbols")
+            if symbol and symbol not in normalized:
+                normalized.append(symbol)
+        return normalized
+
     @model_validator(mode="after")
     def validate_stop_range(self) -> ConfigUpdateRequest:
         if self.min_stop_atr is not None and self.max_stop_atr is not None:
             if self.min_stop_atr > self.max_stop_atr:
                 raise ValueError("min_stop_atr cannot exceed max_stop_atr")
+        if (
+            self.manual_exit_levels_enabled
+            and self.manual_stop_atr is not None
+            and self.max_stop_atr is not None
+            and self.manual_stop_atr > self.max_stop_atr
+        ):
+            raise ValueError("manual_stop_atr cannot exceed max_stop_atr")
         if (
             self.volatility_soft_limit_percentile is not None
             and self.volatility_hard_limit_percentile is not None
@@ -163,6 +222,11 @@ class ReplayBacktestConfigRequest(BaseModel):
     min_net_reward_risk: Decimal | None = Field(default=None, gt=0)
     min_stop_atr: Decimal | None = Field(default=None, gt=0)
     max_stop_atr: Decimal | None = Field(default=None, gt=0)
+    manual_exit_levels_enabled: bool | None = None
+    manual_stop_atr: Decimal | None = Field(default=None, gt=0, le=10)
+    manual_take_profit_atr: Decimal | None = Field(default=None, gt=0, le=20)
+    strong_trend_entry_override_enabled: bool | None = None
+    strong_trend_adx_min: Decimal | None = Field(default=None, ge=0)
     trend_adx_min: Decimal | None = Field(default=None, ge=0)
     volatility_soft_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)
     volatility_hard_limit_percentile: Decimal | None = Field(default=None, ge=0, le=1)

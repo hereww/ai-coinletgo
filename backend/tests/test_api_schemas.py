@@ -11,6 +11,7 @@ from trading_system.api.schemas import (
     ModelProfileSelectRequest,
     ModelRelayUpdateRequest,
     PasswordActionRequest,
+    PnlSyncRequest,
     ReducePositionRequest,
     ReplayBacktestConfigRequest,
     ReplayRequest,
@@ -87,6 +88,18 @@ def test_model_relay_config_accepts_http_urls_without_a_daily_request_ceiling() 
         ModelProfileSelectRequest(profile_id="unknown")
 
 
+def test_pnl_sync_request_requires_an_inclusive_date_range_of_at_most_one_year() -> None:
+    request = PnlSyncRequest(start_date="2026-09-04", end_date="2026-09-05")
+    assert request.start_date.isoformat() == "2026-09-04"
+
+    with pytest.raises(ValidationError, match="end_date cannot precede start_date"):
+        PnlSyncRequest(start_date="2026-09-05", end_date="2026-09-04")
+    with pytest.raises(ValidationError, match="pnl range cannot exceed 366 days"):
+        PnlSyncRequest(start_date="2025-01-01", end_date="2026-01-02")
+    with pytest.raises(ValidationError):
+        PnlSyncRequest(start_date="2026-09-04", end_date="2026-09-05", unexpected=True)
+
+
 def test_position_review_allows_only_bounded_partial_close_fractions() -> None:
     review = PositionReview(
         position_id="binance-BTCUSDT-LONG",
@@ -120,9 +133,14 @@ def test_opening_strategy_config_is_bounded_and_validates_stop_range() -> None:
         min_net_reward_risk="2.5",
         min_stop_atr="1.0",
         max_stop_atr="2.0",
+        manual_exit_levels_enabled=True,
+        manual_stop_atr="1.5",
+        manual_take_profit_atr="5.0",
     )
     assert request.entry_direction == "long_only"
     assert request.entry_trigger == "pullback_only"
+    assert request.manual_exit_levels_enabled is True
+    assert request.manual_stop_atr == Decimal("1.5")
 
     with pytest.raises(ValidationError, match="min_stop_atr cannot exceed max_stop_atr"):
         ConfigUpdateRequest(min_stop_atr="2.2", max_stop_atr="1.2")
@@ -185,6 +203,7 @@ def test_live_settings_keep_a_two_r_minimum_reward_risk_floor(tmp_path: object) 
         candidate_count=5,
         max_positions=3,
         min_net_reward_risk=1.5,
+        portfolio_strategy_enabled=False,
     )
     assert settings.min_net_reward_risk == 2.0
 

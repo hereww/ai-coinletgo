@@ -69,6 +69,11 @@ class BacktestConfig:
     min_net_reward_risk: Decimal = Decimal("2.0")
     min_stop_atr: Decimal = Decimal("0.80")
     max_stop_atr: Decimal = Decimal("2.50")
+    manual_exit_levels_enabled: bool = False
+    manual_stop_atr: Decimal = Decimal("1.80")
+    manual_take_profit_atr: Decimal = Decimal("5.00")
+    strong_trend_entry_override_enabled: bool = False
+    strong_trend_adx_min: Decimal = Decimal("30")
     trend_adx_min: Decimal = Decimal("20")
     volatility_soft_limit_percentile: Decimal = Decimal("0.75")
     volatility_hard_limit_percentile: Decimal = Decimal("0.90")
@@ -273,6 +278,8 @@ class BacktestEngine:
             max_volatility_percentile=config.max_volatility_percentile,
             entry_trigger=config.entry_trigger,
             trend_adx_min=config.trend_adx_min,
+            strong_trend_entry_override_enabled=config.strong_trend_entry_override_enabled,
+            strong_trend_adx_min=config.strong_trend_adx_min,
             volatility_soft_limit_percentile=config.volatility_soft_limit_percentile,
             volatility_hard_limit_percentile=config.volatility_hard_limit_percentile,
         ).eligible(snapshot)
@@ -288,7 +295,17 @@ class BacktestEngine:
             return None
         breakout = donchian_breakout(candles)
         pullback = pullback_signal(candles, trend_1h)
-        if breakout != trend_1h and pullback != trend_1h:
+        if (
+            breakout != trend_1h
+            and pullback != trend_1h
+            and not (
+                config.strong_trend_entry_override_enabled
+                and trend_1h == 1
+                and trend_4h == 1
+                and snapshot.market_regime == "TRENDING"
+                and snapshot.adx_1h >= config.strong_trend_adx_min
+            )
+        ):
             return None
         return PositionSide.LONG if trend_1h == 1 else PositionSide.SHORT
 

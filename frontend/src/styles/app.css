@@ -153,6 +153,12 @@
 .warning-text { color: var(--amber); }
 
 .page-surface { min-height: 420px; }
+.metric-strip.pnl-metric-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 14px; }
+.pnl-date-field { display: grid; gap: 4px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; }
+.pnl-date-field input { width: 132px; min-height: 34px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 5px; outline: 0; background: var(--surface); color: var(--text-section); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.pnl-date-field input:focus { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-soft); }
+.pnl-surface { margin-bottom: 14px; }
+.pnl-table { min-width: 960px; }
 .portfolio-page .section-head h2 { display: flex; align-items: center; gap: 7px; }
 .portfolio-detail { display: grid; gap: 12px; padding: 14px 2px 2px; }
 .portfolio-detail > p { margin: 0; color: var(--text-subtle); font-size: 11px; line-height: 1.55; }
@@ -418,6 +424,10 @@
   .manual-advice-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .manual-chat-compose { grid-template-columns: 1fr; }
   .manual-chat-compose .button { width: 100%; }
+  .metric-strip.pnl-metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pnl-date-field { width: calc(50% - 4px); }
+  .pnl-date-field input { width: 100%; }
+  .command-row > .pnl-date-field + .pnl-date-field { margin-left: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

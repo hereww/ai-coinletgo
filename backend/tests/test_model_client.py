@@ -23,6 +23,8 @@ def model_settings(tmp_path: object) -> Settings:
     return Settings(
         secret_dir=path,
         model_base_url="https://model.example",
+        portfolio_strategy_enabled=False,
+        manual_exit_levels_enabled=False,
     )
 
 
@@ -93,7 +95,7 @@ async def test_valid_structured_response_and_sanitized_payload(tmp_path: object)
 
 
 @pytest.mark.asyncio
-async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
+async def test_portfolio_prompt_keeps_hard_risk_contract_explicit_in_model_primary_mode(
     tmp_path: object,
 ) -> None:
     captured: list[dict[str, object]] = []
@@ -120,9 +122,10 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
         await client.close()
 
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
-    assert "机会下限" in system_text
-    assert "ADX_1h >= 20" in system_text
-    assert "没有同向触发时必须FLAT" in system_text
+    assert "趋势、ADX、15分钟触发" in system_text
+    assert "净盈亏比只作为模型判断证据" in system_text
+    assert "本地硬风控" in system_text
+    assert "所有结果继续接受本地硬风控" in system_text
     assert "entry_range_min_width_abs" in system_text
     assert "不得只把当时的 best_bid、best_ask 原样复制成入场区间" in system_text
 
@@ -131,7 +134,7 @@ async def test_portfolio_prompt_keeps_opportunity_floor_for_aligned_trends(
     assert sent_candidate["entry_range_reference_price"] == "100.0"
     assert Decimal(sent_candidate["entry_range_min_width_abs"]) == Decimal("0.20")
     assert Decimal(sent_candidate["stop_distance_min_abs"]) == Decimal("0.800")
-    assert Decimal(sent_candidate["stop_distance_max_abs"]) == Decimal("2.500")
+    assert Decimal(sent_candidate["stop_distance_max_abs"]) == Decimal("4.0")
 
 
 @pytest.mark.asyncio
@@ -164,6 +167,114 @@ async def test_portfolio_prompt_uses_runtime_reward_risk_floor(tmp_path: object)
 
 
 @pytest.mark.asyncio
+async def test_portfolio_strong_uptrend_bypasses_minimum_reward_risk_contract(
+    tmp_path: object,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        output = {
+            "market_regime": "TRENDING",
+            "portfolio_risk_budget_fraction": 0.4,
+            "allocations": [
+                {
+                    "symbol": "BTCUSDT",
+                    "target_side": "LONG",
+                    "allocation_fraction": 1,
+                    "priority": 1,
+                    "confidence": 0.1,
+                    "entry_min": "100.0",
+                    "entry_max": "100.01",
+                    "stop_price": "99",
+                    "target_price": "100.2",
+                    "thesis": "强趋势测试网策略放行",
+                    "reason_codes": ["STRONG_TREND_ENTRY_OVERRIDE"],
+                    "risk_flags": [],
+                }
+            ],
+            "summary": "强趋势多头",
+            "expires_at": expires_at.isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    settings = model_settings(tmp_path)
+    settings.strong_trend_entry_override_enabled = True
+    settings.min_net_reward_risk = 3
+    client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
+    try:
+        result = await client.analyze_portfolio(
+            [snapshot(breakout_15m=0, pullback_15m=0)], [], expires_at
+        )
+    finally:
+        await client.close()
+
+    assert calls == 1
+    assert result.allocations[0].confidence == Decimal("0.1")
+    assert result.allocations[0].entry_min == Decimal("99.9")
+    assert result.allocations[0].entry_max == Decimal("100.1")
+    assert "STRONG_TREND_ENTRY_OVERRIDE" in result.allocations[0].reason_codes
+
+
+@pytest.mark.asyncio
+async def test_model_primary_portfolio_contract_accepts_valid_ranging_opportunity(
+    tmp_path: object,
+) -> None:
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        output = {
+            "market_regime": "RANGING",
+            "portfolio_risk_budget_fraction": 0.4,
+            "allocations": [
+                {
+                    "symbol": "BTCUSDT",
+                    "target_side": "LONG",
+                    "allocation_fraction": 1,
+                    "priority": 1,
+                    "confidence": 0.1,
+                    "entry_min": "99.9",
+                    "entry_max": "100.1",
+                    "stop_price": "99",
+                    "target_price": "100.2",
+                    "thesis": "震荡区间内出现短线向上机会",
+                    "reason_codes": ["NO_15M_TRIGGER"],
+                    "risk_flags": [],
+                }
+            ],
+            "summary": "模型主导机会",
+            "expires_at": expires_at.isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    settings = model_settings(tmp_path)
+    settings.min_net_reward_risk = 3
+    client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
+    try:
+        result = await client.analyze_portfolio(
+            [
+                snapshot(
+                    market_regime="RANGING",
+                    trend_1h=-1,
+                    trend_4h=-1,
+                    adx_1h=Decimal("5"),
+                    breakout_15m=0,
+                    pullback_15m=0,
+                )
+            ],
+            [],
+            expires_at,
+        )
+    finally:
+        await client.close()
+
+    assert result.allocations[0].target_side.value == "LONG"
+    assert result.allocations[0].confidence == Decimal("0.1")
+
+
+@pytest.mark.asyncio
 async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
     tmp_path: object,
 ) -> None:
@@ -185,7 +296,7 @@ async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
                 "entry_min": "# 99.8",
                 "entry_max": "# 100.2",
                 "stop_price": "# 98.8",
-                "target_price": "# 103.0",
+                "target_price": "# 104.0",
                 "thesis": "多头趋势延续",
                 "reason_codes": [],
                 "risk_flags": [],
@@ -206,7 +317,7 @@ async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
     assert allocation.entry_min == Decimal("99.8")
     assert allocation.entry_max == Decimal("100.2")
     assert allocation.stop_price == Decimal("98.8")
-    assert allocation.target_price == Decimal("103.0")
+    assert allocation.target_price == Decimal("104.0")
 
 
 @pytest.mark.asyncio
@@ -226,6 +337,7 @@ async def test_balanced_portfolio_prompt_requires_a_directional_trigger(tmp_path
 
     settings = model_settings(tmp_path)
     settings.strategy_profile = "balanced"
+    settings.model_primary_portfolio_enabled = False
     client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
     try:
         await client.analyze_portfolio(
@@ -504,7 +616,7 @@ async def test_portfolio_market_contract_repairs_stop_beyond_atr_limit(
                 "confidence": 0.85,
                 "entry_min": "99.8",
                 "entry_max": "100.2",
-                "stop_price": "97.0",
+                    "stop_price": "95.0",
                 "target_price": "107.0",
                 "thesis": "多头趋势延续",
                 "reason_codes": ["TREND_ALIGNED"],
@@ -1191,6 +1303,7 @@ async def test_live_mode_rejects_plain_http_model_endpoint(tmp_path: object) -> 
         portfolio_risk_pct=0.0075,
         candidate_count=5,
         max_positions=3,
+        portfolio_strategy_enabled=False,
     )
     client = ResponsesModelClient(
         settings,

@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from trading_system.domain.enums import OrderStatus, PositionSide
 from trading_system.domain.models import ExecutionIntent, OrderState, PositionState
-from trading_system.exchange.base import ExchangeError, ExchangeGateway
+from trading_system.exchange.base import ExchangeError, ExchangeGateway, ExchangeUnknownStatusError
 
 Sleep = Callable[[float], Awaitable[None]]
 EntryGuard = Callable[[], Awaitable[bool]]
@@ -19,6 +19,16 @@ async def _entries_allowed() -> bool:
 
 class ProtectionError(RuntimeError):
     pass
+
+
+class EntryNotSubmittedError(ExchangeError):
+    """An entry failed before Binance could create an exposure.
+
+    This is deliberately narrower than a generic exchange error.  It is used
+    only for pre-flight work and Binance's explicit 4xx order rejection;
+    cancellations, partial fills, protection updates, and ambiguous writes
+    keep their existing fail-closed behaviour.
+    """
 
 
 class ExecutionManager:
@@ -43,8 +53,22 @@ class ExecutionManager:
     async def execute(self, intent: ExecutionIntent) -> tuple[OrderState, list[OrderState]]:
         self.last_emergency_orders = []
         if intent.expires_at <= datetime.now(UTC):
-            raise ExchangeError("execution intent expired")
-        await self.exchange.configure_symbol(intent.symbol, intent.leverage)
+            raise EntryNotSubmittedError("execution intent expired")
+        try:
+            await self.exchange.configure_symbol(intent.symbol, intent.leverage)
+        except ExchangeUnknownStatusError:
+            raise
+        except ExchangeError as error:
+            # Changing margin/leverage cannot create a position.  An error
+            # here is therefore safe to audit as a rejected opportunity and
+            # retry next cycle rather than pausing every future entry.
+            raise EntryNotSubmittedError(
+                f"entry preparation failed: {str(error)[:300]}",
+                code=error.code,
+                http_status=error.http_status,
+                headers=error.headers,
+                retry_after_seconds=error.retry_after_seconds,
+            ) from error
         entry_side = "BUY" if intent.side == PositionSide.LONG else "SELL"
         last_order: OrderState | None = None
         protected_quantity = Decimal("0")
@@ -53,11 +77,40 @@ class ExecutionManager:
         for attempt in range(self.max_reprices + 1):
             if not await self.entry_guard():
                 raise ExchangeError("system mode no longer allows entries")
-            price = await self.exchange.best_entry_price(intent.symbol, entry_side)
+            try:
+                price = await self.exchange.best_entry_price(intent.symbol, entry_side)
+            except ExchangeUnknownStatusError:
+                raise
+            except ExchangeError as error:
+                # This is a read-only quote lookup.  No entry exists yet.
+                raise EntryNotSubmittedError(
+                    f"entry quote unavailable: {str(error)[:300]}",
+                    code=error.code,
+                    http_status=error.http_status,
+                    headers=error.headers,
+                    retry_after_seconds=error.retry_after_seconds,
+                ) from error
             if not self._inside_entry_guard(intent, price):
                 raise ExchangeError("current price moved outside approved entry guard")
             client_id = self._entry_client_id(intent, attempt)
-            order = await self.exchange.place_limit_entry(intent, client_id, price)
+            try:
+                order = await self.exchange.place_limit_entry(intent, client_id, price)
+            except ExchangeUnknownStatusError:
+                raise
+            except ExchangeError as error:
+                # The Binance adapter resolves ambiguous POST failures into
+                # ExchangeUnknownStatusError.  A direct 4xx here is an
+                # explicit exchange rejection, so Binance did not accept the
+                # entry and there is no new position to reconcile.
+                if error.http_status is not None and 400 <= error.http_status < 500:
+                    raise EntryNotSubmittedError(
+                        f"entry order explicitly rejected: {str(error)[:300]}",
+                        code=error.code,
+                        http_status=error.http_status,
+                        headers=error.headers,
+                        retry_after_seconds=error.retry_after_seconds,
+                    ) from error
+                raise
             last_order = order
             protected_quantity, protection_orders = await self._protect_new_fills(
                 intent,

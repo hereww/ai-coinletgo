@@ -72,6 +72,11 @@ class BinanceUSDMarketClient(ExchangeGateway):
         self._request_backoff_reason = ""
         self._positions_cache: tuple[float, list[PositionState]] | None = None
         self._positions_lock = asyncio.Lock()
+        # Strategy cycles and the position-protection monitor can both refresh
+        # the same symbol at nearly the same time. Serialize the full
+        # cancel/observe/create/verify transaction per position side so two
+        # callers cannot replace each other's stop or take-profit orders.
+        self._protection_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     @property
     def configured(self) -> bool:
@@ -557,6 +562,18 @@ class BinanceUSDMarketClient(ExchangeGateway):
         )
         return min(bids, asks)
 
+    async def get_order_book_snapshot(self, symbol: str, limit: int = 1_000) -> dict[str, Any]:
+        if limit < 5 or limit > 1_000:
+            raise ExchangeError("order book snapshot limit must be between 5 and 1000")
+        body = await self._request("GET", "/fapi/v1/depth", {"symbol": symbol, "limit": limit})
+        if not isinstance(body, dict) or "lastUpdateId" not in body:
+            raise ExchangeError("Binance order book snapshot is malformed")
+        return {
+            "lastUpdateId": int(body["lastUpdateId"]),
+            "bids": body.get("bids", []),
+            "asks": body.get("asks", []),
+        }
+
     async def get_filters(self, symbol: str) -> ExchangeFilters:
         if symbol in self._filter_cache:
             return self._filter_cache[symbol]
@@ -848,6 +865,27 @@ class BinanceUSDMarketClient(ExchangeGateway):
         return self._order_state(body)
 
     async def upsert_protection(
+        self, intent: ExecutionIntent, filled_quantity: Decimal, average_price: Decimal
+    ) -> list[OrderState]:
+        lock = self._protection_lock(intent.symbol, intent.side.value)
+        async with lock:
+            return await self._upsert_protection_unlocked(
+                intent, filled_quantity, average_price
+            )
+
+    def _protection_lock(self, symbol: str, position_side: str) -> asyncio.Lock:
+        """Return the per-symbol/side lock shared by every protection mutation.
+
+        Rebuilding protection after a reduce must be serialized with TP
+        cancellation and trailing-stop replacement as one transaction.  A
+        lock only around ``upsert_protection`` is insufficient because those
+        other public methods can otherwise observe or mutate a half-replaced
+        stop/TP set concurrently.
+        """
+
+        return self._protection_locks.setdefault((symbol, position_side), asyncio.Lock())
+
+    async def _upsert_protection_unlocked(
         self, intent: ExecutionIntent, filled_quantity: Decimal, average_price: Decimal
     ) -> list[OrderState]:
         raw_tp1_price = self._tp1_for_fill(intent, average_price)
@@ -1289,35 +1327,48 @@ class BinanceUSDMarketClient(ExchangeGateway):
         return orders
 
     async def cancel_position_take_profits(self, position: PositionState) -> None:
-        orders = self._algo_orders(
-            await self._request(
-                "GET", "/fapi/v1/openAlgoOrders", {"symbol": position.symbol}, signed=True
+        lock = self._protection_lock(position.symbol, position.side.value)
+        async with lock:
+            orders = self._algo_orders(
+                await self._request(
+                    "GET", "/fapi/v1/openAlgoOrders", {"symbol": position.symbol}, signed=True
+                )
             )
-        )
-        for order in orders:
-            if (
-                order.get("positionSide") == position.side.value
-                and str(order.get("orderType") or order.get("type") or "").startswith("TAKE_PROFIT")
-                and self._algo_client_id(order).startswith("frc_")
-                and self._algo_active(order)
-            ):
-                await self._cancel_algo_order(position.symbol, order)
+            for order in orders:
+                if (
+                    order.get("positionSide") == position.side.value
+                    and str(order.get("orderType") or order.get("type") or "").startswith(
+                        "TAKE_PROFIT"
+                    )
+                    and self._algo_client_id(order).startswith("frc_")
+                    and self._algo_active(order)
+                ):
+                    await self._cancel_algo_order(position.symbol, order)
 
     async def cancel_position_protection(self, position: PositionState) -> None:
-        orders = self._algo_orders(
-            await self._request(
-                "GET", "/fapi/v1/openAlgoOrders", {"symbol": position.symbol}, signed=True
+        lock = self._protection_lock(position.symbol, position.side.value)
+        async with lock:
+            orders = self._algo_orders(
+                await self._request(
+                    "GET", "/fapi/v1/openAlgoOrders", {"symbol": position.symbol}, signed=True
+                )
             )
-        )
-        for order in orders:
-            if (
-                order.get("positionSide") == position.side.value
-                and self._algo_client_id(order).startswith("frc_")
-                and self._algo_active(order)
-            ):
-                await self._cancel_algo_order(position.symbol, order)
+            for order in orders:
+                if (
+                    order.get("positionSide") == position.side.value
+                    and self._algo_client_id(order).startswith("frc_")
+                    and self._algo_active(order)
+                ):
+                    await self._cancel_algo_order(position.symbol, order)
 
     async def tighten_stop(self, position: PositionState, new_stop: Decimal) -> OrderState:
+        lock = self._protection_lock(position.symbol, position.side.value)
+        async with lock:
+            return await self._tighten_stop_unlocked(position, new_stop)
+
+    async def _tighten_stop_unlocked(
+        self, position: PositionState, new_stop: Decimal
+    ) -> OrderState:
         filters = await self.get_filters(position.symbol)
         rounding = ROUND_DOWN if position.side == PositionSide.LONG else ROUND_UP
         new_stop = (new_stop / filters.tick_size).to_integral_value(

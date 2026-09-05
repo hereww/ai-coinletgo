@@ -11,10 +11,13 @@ __pycache__/
 htmlcov/
 *.db
 *.sqlite3
+*.tsbuildinfo
 node_modules/
 frontend/dist/
 playwright-report/
 test-results/
+.playwright-mcp/
+portfolio-decisions-*.json
 *-validation.png
 backups/*
 !backups/.gitkeep

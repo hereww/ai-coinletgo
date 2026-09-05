@@ -8,18 +8,32 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { PageHeader } from '../components/PageHeader'
 import { PageError, PageLoading } from '../components/PageState'
 
+const TESTNET_ENTRY_DEFAULTS: Partial<RiskConfig> = {
+  manual_exit_levels_enabled: true,
+  manual_stop_atr: 1.8,
+  manual_take_profit_atr: 5,
+  model_primary_portfolio_enabled: true,
+  strong_trend_entry_override_enabled: true,
+  strong_trend_adx_min: 30,
+}
+
 export default function RiskPage() {
   const queryClient = useQueryClient()
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
   const [form, setForm] = useState<Partial<RiskConfig>>({})
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [customSymbols, setCustomSymbols] = useState('')
+  const [hftSymbols, setHftSymbols] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
 
   useEffect(() => {
     if (config.data) {
-      setForm(config.data)
+      setForm({
+        ...TESTNET_ENTRY_DEFAULTS,
+        ...config.data,
+      })
       setCustomSymbols((config.data.entry_symbols ?? []).filter((symbol) => !COMMON_ENTRY_SYMBOLS.includes(symbol)).join(', '))
+      setHftSymbols((config.data.hft_symbols ?? []).join(', '))
     }
   }, [config.data])
 
@@ -55,8 +69,13 @@ export default function RiskPage() {
       ['最低净盈亏比', form.min_net_reward_risk],
       ['最小止损距离', form.min_stop_atr],
       ['最大止损距离', form.max_stop_atr],
+      ['手动止损距离', form.manual_stop_atr],
+      ['手动止盈距离', form.manual_take_profit_atr],
       ['高波动风险系数', form.elevated_volatility_risk_multiplier ?? 0.75],
       ['极端波动风险系数', form.high_volatility_risk_multiplier ?? 0.5],
+      ['HFT 最小盘口深度', form.hft_min_depth_usdt],
+      ['HFT 单笔名义价值', form.hft_order_notional_usdt],
+      ['HFT 最大库存', form.hft_max_inventory_usdt],
     ]
     const invalidPositive = positiveFields.find(([, value]) => value === undefined || !Number.isFinite(value) || value <= 0)
     if (invalidPositive) {
@@ -67,12 +86,20 @@ export default function RiskPage() {
       setValidationError('最小止损距离不能大于最大止损距离')
       return
     }
+    if (form.manual_exit_levels_enabled && form.manual_stop_atr !== undefined && form.max_stop_atr !== undefined && form.manual_stop_atr > form.max_stop_atr) {
+      setValidationError('手动止损距离不能大于最大止损距离')
+      return
+    }
     if (form.correlation_limit !== undefined && (form.correlation_limit < 0 || form.correlation_limit > 1)) {
       setValidationError('相关性阈值必须在 0 到 1 之间')
       return
     }
     if (form.min_confidence !== undefined && (form.min_confidence < 0 || form.min_confidence > 1)) {
       setValidationError('最低置信度必须在 0% 到 100% 之间')
+      return
+    }
+    if (form.strong_trend_adx_min !== undefined && (!Number.isFinite(form.strong_trend_adx_min) || form.strong_trend_adx_min < 0)) {
+      setValidationError('强趋势最低 ADX 不能小于 0')
       return
     }
     if (
@@ -91,8 +118,20 @@ export default function RiskPage() {
       setValidationError('最高杠杆必须在 1 到 30 倍之间')
       return
     }
-    if ((form.scan_interval_minutes ?? 0) < 5 || (form.scan_interval_minutes ?? 0) > 120) {
-      setValidationError('扫描周期必须在 5 到 120 分钟之间')
+    if (![5, 15, 30, 60].includes(form.scan_interval_minutes ?? 0)) {
+      setValidationError('扫描周期只能选择 5、15、30 或 60 分钟')
+      return
+    }
+    if (form.hft_event_interval_ms !== undefined && (form.hft_event_interval_ms < 50 || form.hft_event_interval_ms > 5000)) {
+      setValidationError('HFT 事件处理间隔必须在 50 到 5000 毫秒之间')
+      return
+    }
+    if (form.hft_max_spread_pct !== undefined && (form.hft_max_spread_pct <= 0 || form.hft_max_spread_pct > 0.02)) {
+      setValidationError('HFT 最大点差必须在 0% 到 2% 之间')
+      return
+    }
+    if (form.hft_imbalance_threshold !== undefined && (form.hft_imbalance_threshold <= 0 || form.hft_imbalance_threshold >= 1)) {
+      setValidationError('HFT 盘口不平衡阈值必须在 0% 到 100% 之间')
       return
     }
     setValidationError(null)
@@ -127,18 +166,25 @@ export default function RiskPage() {
           <SelectField label="允许开仓方向" value={form.entry_direction ?? 'both'} onChange={(value) => update('entry_direction', value)} options={[['both', '多空双向'], ['long_only', '仅做多'], ['short_only', '仅做空']]} />
           <SelectField label="入场触发" value={form.entry_trigger ?? 'breakout_or_pullback'} onChange={(value) => update('entry_trigger', value)} options={[['breakout_or_pullback', '突破或回踩'], ['breakout_only', '仅突破'], ['pullback_only', '仅回踩']]} />
           <NumberField label="候选合约数量" value={form.candidate_count ?? 5} step={1} onChange={(value) => update('candidate_count', value)} />
-          <NumberField label="扫描周期（分钟）" value={form.scan_interval_minutes ?? 5} step={5} min={5} max={120} onChange={(value) => update('scan_interval_minutes', value)} />
+          <SelectField label="扫描周期（分钟）" value={String(form.scan_interval_minutes ?? 5)} onChange={(value) => update('scan_interval_minutes', Number(value))} options={[['5', '5 分钟'], ['15', '15 分钟'], ['30', '30 分钟'], ['60', '60 分钟']]} />
           <NumberField label="最低置信度 (%)" value={(form.min_confidence ?? 0.75) * 100} step={1} onChange={(value) => update('min_confidence', value / 100)} />
           <NumberField label="最低净盈亏比" value={form.min_net_reward_risk ?? 1.8} step={0.1} min={1} onChange={(value) => update('min_net_reward_risk', value)} />
           <NumberField label="最小止损距离 (ATR)" value={form.min_stop_atr ?? 0.8} step={0.1} onChange={(value) => update('min_stop_atr', value)} />
-          <NumberField label="最大止损距离 (ATR)" value={form.max_stop_atr ?? 2.5} step={0.1} onChange={(value) => update('max_stop_atr', value)} />
+          <NumberField label="最大止损距离 (ATR)" value={form.max_stop_atr ?? 4} step={0.1} onChange={(value) => update('max_stop_atr', value)} />
+          <label className="checkbox-row"><input type="checkbox" checked={form.manual_exit_levels_enabled ?? true} onChange={(event) => update('manual_exit_levels_enabled', event.target.checked)} /><span>启用手动止盈止损（新开仓）</span></label>
+          <NumberField label="手动止损距离 (ATR)" value={form.manual_stop_atr ?? 1.8} step={0.1} min={0.1} max={10} onChange={(value) => update('manual_stop_atr', value)} />
+          <NumberField label="手动止盈距离 (ATR)" value={form.manual_take_profit_atr ?? 5} step={0.1} min={0.1} max={20} onChange={(value) => update('manual_take_profit_atr', value)} />
+          <label className="checkbox-row"><input type="checkbox" checked={form.model_primary_portfolio_enabled ?? true} onChange={(event) => update('model_primary_portfolio_enabled', event.target.checked)} /><span>模型主导组合决策（测试网）</span></label>
+          <label className="checkbox-row"><input type="checkbox" checked={form.strong_trend_entry_override_enabled ?? true} onChange={(event) => update('strong_trend_entry_override_enabled', event.target.checked)} /><span>强劲上升趋势策略放行（仅保留硬资金安全）</span></label>
+          <NumberField label="强趋势最低 ADX" value={form.strong_trend_adx_min ?? 30} step={1} min={0} onChange={(value) => update('strong_trend_adx_min', value)} />
           <NumberField label="最低趋势强度 (ADX)" value={form.trend_adx_min ?? 20} step={1} min={0} onChange={(value) => update('trend_adx_min', value)} />
           <NumberField label="高波动分位 (%)" value={(form.volatility_soft_limit_percentile ?? 0.75) * 100} step={1} min={0} max={100} onChange={(value) => update('volatility_soft_limit_percentile', value / 100)} />
           <NumberField label="极端波动分位 (%)" value={(form.volatility_hard_limit_percentile ?? 0.9) * 100} step={1} min={0} max={100} onChange={(value) => update('volatility_hard_limit_percentile', value / 100)} />
           <NumberField label="高波动风险系数" value={form.elevated_volatility_risk_multiplier ?? 0.75} step={0.05} min={0.05} max={1} onChange={(value) => update('elevated_volatility_risk_multiplier', value)} />
           <NumberField label="极端波动风险系数" value={form.high_volatility_risk_multiplier ?? 0.5} step={0.05} min={0.05} max={1} onChange={(value) => update('high_volatility_risk_multiplier', value)} />
         </div>
-        <p className="setup-note">系统只在趋势状态允许新开仓；波动率升高时会自动把风险预算缩减到配置系数，极端波动状态仍禁止新增风险。测试网建议最低净盈亏比保持在 1.8–2.0，继续降低会明显放大手续费和滑点影响。</p>
+        <p className="setup-note">模型主导开启后，模型负责方向、机会和目标仓位；置信度、ADX、趋势、15 分钟触发、最低盈亏比、相关性和调仓冷却不再否决模型意图。仍强制执行风控止盈止损、组合风险与保证金上限、总仓位数、可用余额、交易所精度、系统模式和熔断。</p>
+        <p className="setup-note">启用风控接管止盈止损后，新开仓按 ATR 自动生成止损/最终止盈（默认 1.8 / 5.0 ATR），覆盖模型绝对价；已有仓位沿用已生效的交易所保护单，不会被模型放宽或频繁改写。</p>
         <p className="setup-note">扫描周期可设为 5–120 分钟，并按固定时间边界运行；5 分钟约为每天 288 次分析。保存后 Worker 会在等待期间自动重新计算下一次扫描时间。</p>
 
         <div className="section-head"><h2>账户级限制</h2><ShieldCheck size={18} /></div>
@@ -164,6 +210,23 @@ export default function RiskPage() {
         </div>
         <p className="setup-note">Portfolio-v1 让 AI 输出组合风险预算和各币风险份额；数量、杠杆和订单细节仍由确定性风控计算。启用后只允许测试网执行，模型无效时不会产生调仓订单。</p>
 
+        <div className="section-head"><h2>HFT 盘口 shadow</h2><ShieldCheck size={18} /></div>
+        <div className="settings-grid">
+          <label className="checkbox-row"><input type="checkbox" checked={form.hft_enabled ?? false} onChange={(event) => update('hft_enabled', event.target.checked)} /><span>启用 HFT 盘口策略（仅测试网）</span></label>
+          <label className="checkbox-row"><input type="checkbox" checked disabled /><span>dry-run 纸面成交（强制开启）</span></label>
+          <label className="field-label">HFT 合约（逗号分隔）<input value={hftSymbols} onChange={(event) => { const value = event.target.value; setHftSymbols(value); update('hft_symbols', value.split(',').map((item) => item.trim().toUpperCase()).filter(Boolean)) }} placeholder="例如 BTCUSDT, ETHUSDT" /></label>
+          <NumberField label="事件处理间隔 (ms)" value={form.hft_event_interval_ms ?? 100} step={50} min={50} max={5000} onChange={(value) => update('hft_event_interval_ms', value)} />
+          <NumberField label="最大点差 (%)" value={(form.hft_max_spread_pct ?? 0.0008) * 100} step={0.01} min={0.01} max={2} onChange={(value) => update('hft_max_spread_pct', value / 100)} />
+          <NumberField label="最小双边深度 (USDT)" value={form.hft_min_depth_usdt ?? 25000} step={1000} onChange={(value) => update('hft_min_depth_usdt', value)} />
+          <NumberField label="单笔名义价值 (USDT)" value={form.hft_order_notional_usdt ?? 50} step={5} onChange={(value) => update('hft_order_notional_usdt', value)} />
+          <NumberField label="最大库存 (USDT)" value={form.hft_max_inventory_usdt ?? 250} step={10} onChange={(value) => update('hft_max_inventory_usdt', value)} />
+          <NumberField label="交易冷却 (秒)" value={form.hft_cooldown_seconds ?? 3} step={1} min={0} max={3600} onChange={(value) => update('hft_cooldown_seconds', value)} />
+          <NumberField label="行情 stale 阈值 (秒)" value={form.hft_market_stale_seconds ?? 2} step={0.1} min={0.1} max={60} onChange={(value) => update('hft_market_stale_seconds', value)} />
+          <NumberField label="连续亏损熔断次数" value={form.hft_max_consecutive_losses ?? 3} step={1} min={1} max={100} onChange={(value) => update('hft_max_consecutive_losses', value)} />
+          <NumberField label="盘口不平衡阈值 (%)" value={(form.hft_imbalance_threshold ?? 0.2) * 100} step={1} min={1} max={99} onChange={(value) => update('hft_imbalance_threshold', value / 100)} />
+        </div>
+        <p className="setup-note">HFT 首版读取 Binance Futures `depth@100ms` 差分盘口，用盘口不平衡和 microprice 生成 shadow 信号；只做纸面成交，不调用真实下单接口。测试网、API 密钥和代理条件不满足时，HFT 不会启动。</p>
+
         {validationError ? <div className="inline-error" role="alert">{validationError}</div> : null}
         {save.error && !confirmOpen ? <div className="inline-error" role="alert">{save.error.message}</div> : null}
         {save.isSuccess ? <div className="success-note">开仓与风控配置已更新并写入审计日志</div> : null}
@@ -172,7 +235,7 @@ export default function RiskPage() {
 
       <aside className="surface immutable-limits">
         <div className="section-head"><h2>不可放宽规则</h2></div>
-        <dl><div><dt>杠杆</dt><dd>1–30×</dd></div><div><dt>扫描周期</dt><dd>5–120 分钟</dd></div><div><dt>风险与止损数值</dt><dd>必须大于 0</dd></div><div><dt>止损区间</dt><dd>最小值 ≤ 最大值</dd></div><div><dt>置信度 / 相关性</dt><dd>0–1</dd></div><div><dt>补仓与马丁</dt><dd>禁止</dd></div></dl>
+        <dl><div><dt>杠杆</dt><dd>1–30×</dd></div><div><dt>扫描周期</dt><dd>5 / 15 / 30 / 60 分钟</dd></div><div><dt>风险与止损数值</dt><dd>必须大于 0</dd></div><div><dt>止损区间</dt><dd>最小值 ≤ 最大值</dd></div><div><dt>手动止盈止损</dt><dd>仅测试网新开仓</dd></div><div><dt>强趋势放行</dt><dd>仅测试网多头机会策略</dd></div><div><dt>置信度 / 相关性</dt><dd>0–1</dd></div><div><dt>HFT 执行</dt><dd>仅测试网 dry-run</dd></div><div><dt>补仓与马丁</dt><dd>禁止</dd></div></dl>
         <p className="setup-note">AI 策略模板（趋势跟随、平衡、保守、短线）在“设置 → AI 中转 / Responses API”中选择。</p>
       </aside>
     </section>

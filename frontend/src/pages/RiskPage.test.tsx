@@ -28,9 +28,31 @@ const config = {
   min_confidence: 0.75,
   min_net_reward_risk: 2,
   min_stop_atr: 0.8,
-  max_stop_atr: 2.5,
+  max_stop_atr: 4,
+  manual_exit_levels_enabled: false,
+  manual_stop_atr: 1.8,
+  manual_take_profit_atr: 5,
+  model_primary_portfolio_enabled: true,
+  strong_trend_entry_override_enabled: true,
+  strong_trend_adx_min: 30,
   entry_symbols: [],
   model_name: 'gpt-5.6',
+  strategy_profile: 'trend_following',
+  portfolio_strategy_enabled: true,
+  portfolio_rebalance_deadband_fraction: 0.1,
+  portfolio_rebalance_cooldown_minutes: 30,
+  hft_enabled: false,
+  hft_dry_run: true,
+  hft_symbols: ['BTCUSDT', 'ETHUSDT'],
+  hft_event_interval_ms: 100,
+  hft_max_spread_pct: 0.0008,
+  hft_min_depth_usdt: 25000,
+  hft_order_notional_usdt: 50,
+  hft_max_inventory_usdt: 250,
+  hft_cooldown_seconds: 3,
+  hft_market_stale_seconds: 2,
+  hft_max_consecutive_losses: 3,
+  hft_imbalance_threshold: 0.2,
 }
 
 it('confirms editable risk settings with the operator password', async () => {
@@ -60,18 +82,25 @@ it('allows the configured leverage ceiling to be raised to 30x', async () => {
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ max_leverage: 30 })))
 })
 
-it('allows the scan interval to be configured from 5 to 120 minutes', async () => {
+it('allows the scan interval to be configured from the supported cadence set', async () => {
   apiMock.config.mockResolvedValue(config)
   apiMock.updateConfig.mockResolvedValue({ ...config, scan_interval_minutes: 30 })
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
   const interval = await screen.findByLabelText('扫描周期（分钟）')
-  expect(interval).toHaveAttribute('min', '5')
-  expect(interval).toHaveAttribute('max', '120')
+  expect(Array.from(interval.querySelectorAll('option')).map((option) => option.value)).toEqual(['5', '15', '30', '60'])
   fireEvent.change(interval, { target: { value: '30' } })
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
   fireEvent.change(await screen.findByLabelText('操作密码'), { target: { value: 'operator-password' } })
   fireEvent.click(await screen.findByRole('button', { name: '确认保存' }))
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ scan_interval_minutes: 30 })))
+})
+
+it('explains that model-led decisions keep only hard capital safety checks', async () => {
+  apiMock.config.mockResolvedValue(config)
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
+
+  expect(await screen.findByText('模型主导组合决策（测试网）')).toBeInTheDocument()
+  expect(screen.getByText(/置信度、ADX、趋势、15 分钟触发、最低盈亏比、相关性和调仓冷却不再否决/)).toBeInTheDocument()
 })
 
 it('allows previously locked risk limits and wide stop ranges to be edited', async () => {
@@ -123,6 +152,24 @@ it('allows previously locked risk limits and wide stop ranges to be edited', asy
     single_trade_risk_pct: 0.04,
     portfolio_risk_pct: 0.2,
     max_margin_pct: 0.8,
+  })))
+})
+
+it('allows testnet manual ATR exits to be configured', async () => {
+  apiMock.config.mockResolvedValue(config)
+  apiMock.updateConfig.mockResolvedValue({ ...config, manual_exit_levels_enabled: true, manual_stop_atr: 2, manual_take_profit_atr: 6 })
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
+
+  fireEvent.click(await screen.findByLabelText('启用手动止盈止损（新开仓）'))
+  fireEvent.change(screen.getByLabelText('手动止损距离 (ATR)'), { target: { value: '2' } })
+  fireEvent.change(screen.getByLabelText('手动止盈距离 (ATR)'), { target: { value: '6' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+  fireEvent.change(await screen.findByLabelText('操作密码'), { target: { value: 'operator-password' } })
+  fireEvent.click(await screen.findByRole('button', { name: '确认保存' }))
+  await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+    manual_exit_levels_enabled: true,
+    manual_stop_atr: 2,
+    manual_take_profit_atr: 6,
   })))
 })
 

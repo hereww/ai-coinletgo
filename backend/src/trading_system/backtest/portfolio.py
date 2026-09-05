@@ -367,6 +367,8 @@ class PortfolioBacktestEngine(BacktestEngine):
                 resolved_config.entry_trigger,
             ),
             trend_adx_min=resolved_config.trend_adx_min,
+            strong_trend_entry_override_enabled=resolved_config.strong_trend_entry_override_enabled,
+            strong_trend_adx_min=resolved_config.strong_trend_adx_min,
             volatility_soft_limit_percentile=resolved_config.volatility_soft_limit_percentile,
             volatility_hard_limit_percentile=resolved_config.volatility_hard_limit_percentile,
         )
@@ -546,6 +548,11 @@ class PortfolioBacktestEngine(BacktestEngine):
             correlation_limit=config.correlation_limit,
             min_stop_atr=config.min_stop_atr,
             max_stop_atr=config.max_stop_atr,
+            manual_exit_levels_enabled=config.manual_exit_levels_enabled,
+            manual_stop_atr=config.manual_stop_atr,
+            manual_take_profit_atr=config.manual_take_profit_atr,
+            strong_trend_entry_override_enabled=config.strong_trend_entry_override_enabled,
+            strong_trend_adx_min=config.strong_trend_adx_min,
             min_confidence=config.min_confidence,
             min_net_reward_risk=config.min_net_reward_risk,
             entry_direction=cast(

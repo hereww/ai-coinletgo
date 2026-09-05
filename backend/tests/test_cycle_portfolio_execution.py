@@ -60,6 +60,24 @@ class FakeExitManager:
         ]
 
 
+class FakeExecutionManager:
+    def __init__(self) -> None:
+        self.intents: list[ExecutionIntent] = []
+
+    async def execute(self, intent: ExecutionIntent):
+        self.intents.append(intent)
+        return (
+            _order("LIMIT").model_copy(
+                update={
+                    "filled_quantity": intent.quantity,
+                    "average_price": intent.limit_price,
+                    "status": OrderStatus.FILLED,
+                }
+            ),
+            [],
+        )
+
+
 class FakeExchange:
     def __init__(self, remaining):
         self.remaining = remaining
@@ -95,6 +113,7 @@ def _cycle(exchange: FakeExchange) -> TradingCycle:
     cycle = TradingCycle.__new__(TradingCycle)
     cycle.exchange = exchange
     cycle.exits = FakeExitManager()
+    cycle.execution = FakeExecutionManager()
     cycle.settings = SimpleNamespace(max_leverage=3)
     return cycle
 
@@ -147,6 +166,73 @@ def test_price_guard_miss_is_a_soft_no_fill_but_unknown_order_status_is_not() ->
             client_order_id="frc-unknown",
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("side", "entry", "stop", "target", "expected"),
+    [
+        (
+            PositionSide.LONG,
+            Decimal("0.08745"),
+            Decimal("0.08690"),
+            Decimal("0.08800"),
+            Decimal("0.087725"),
+        ),
+        (
+            PositionSide.SHORT,
+            Decimal("100"),
+            Decimal("101"),
+            Decimal("98"),
+            Decimal("99"),
+        ),
+    ],
+)
+def test_safe_first_take_profit_repairs_tp1_tp2_collision(
+    side: PositionSide,
+    entry: Decimal,
+    stop: Decimal,
+    target: Decimal,
+    expected: Decimal,
+) -> None:
+    assert TradingCycle._safe_first_take_profit(
+        entry=entry,
+        stop_price=stop,
+        target_price=target,
+        side=side,
+    ) == expected
+
+
+def test_safe_first_take_profit_keeps_mechanical_one_r_when_target_is_far_enough() -> None:
+    assert TradingCycle._safe_first_take_profit(
+        entry=Decimal("100"),
+        stop_price=Decimal("98"),
+        target_price=Decimal("106"),
+        side=PositionSide.LONG,
+    ) == Decimal("102")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_open_compiles_valid_intent_when_model_tp2_equals_one_r() -> None:
+    action = PortfolioPlanAction(
+        action_id=uuid4(),
+        allocation_id=uuid4(),
+        symbol="DOGEUSDT",
+        action=PortfolioPlanActionType.OPEN,
+        side=PositionSide.LONG,
+        target_quantity=Decimal("100"),
+        quantity_delta=Decimal("100"),
+        entry_min=Decimal("0.08745"),
+        entry_max=Decimal("0.08765"),
+        stop_price=Decimal("0.08690"),
+        target_price=Decimal("0.08800"),
+    )
+    cycle = _cycle(FakeExchange(None))
+
+    await cycle._execute_portfolio_action(action, {}, _decision())
+
+    intent = cycle.execution.intents[0]
+    assert intent.tp1_price == Decimal("0.087725")
+    assert intent.tp1_price < intent.tp2_price
 
 
 @pytest.mark.asyncio
