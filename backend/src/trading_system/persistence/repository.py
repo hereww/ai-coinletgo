@@ -26,6 +26,7 @@ from trading_system.persistence.records import (
     AuditEventRecord,
     EquityCheckpointRecord,
     EquityHistoryRecord,
+    FactorResearchRunRecord,
     IncomeLedgerRecord,
     MarketFeatureRecord,
     ModelReplayCacheRecord,
@@ -251,9 +252,7 @@ def _action_label_zh(action: str) -> str:
     return {"OPEN_LONG": "开多", "OPEN_SHORT": "开空"}.get(action, "开仓")
 
 
-def _signal_recommendation_zh(
-    status: str, action: str, raw_codes: list[str]
-) -> str:
+def _signal_recommendation_zh(status: str, action: str, raw_codes: list[str]) -> str:
     codes = {code.upper() for code in raw_codes}
     if "FORCED_TESTNET_VALIDATION" in codes:
         return "仅用于测试网链路验证；正式策略仍需等待完整信号，不能据此放宽风控。"
@@ -358,9 +357,7 @@ def _reason_codes_zh(payload: dict[str, Any], labels: dict[str, str]) -> list[st
     return [labels.get(code, _unknown_reason_zh(code)) for code in _raw_reason_codes(payload)]
 
 
-def _reason_codes_zh_from_codes(
-    codes: list[str], labels: dict[str, str]
-) -> list[str]:
+def _reason_codes_zh_from_codes(codes: list[str], labels: dict[str, str]) -> list[str]:
     return [labels.get(code, _unknown_reason_zh(code)) for code in codes]
 
 
@@ -437,8 +434,7 @@ class Repository:
                 return {
                     "mode": default.value,
                     "environment": environment,
-                    "entries_enabled": default
-                    in {SystemMode.TESTNET, SystemMode.LIVE_ENABLED},
+                    "entries_enabled": default in {SystemMode.TESTNET, SystemMode.LIVE_ENABLED},
                     "halt_reason": None,
                     "updated_at": None,
                 }
@@ -473,9 +469,7 @@ class Repository:
         # Runtime settings are persisted as JSON and normally bypass Pydantic's
         # constructor.  Re-validate the merged object so a stale testnet-only
         # aggressive setting cannot silently leak into live mode after a restart.
-        validated = type(settings).model_validate(
-            {**settings.model_dump(), **updates}
-        )
+        validated = type(settings).model_validate({**settings.model_dump(), **updates})
         for key in updates:
             setattr(settings, key, getattr(validated, key))
         return values
@@ -674,9 +668,7 @@ class Repository:
                     # filters, limits, snapshots and compiler clock, without a
                     # new network/model request or current-state contamination.
                     payload["portfolio_replay_context"] = replay_context
-                    payload["portfolio_compiled_plan"] = compiled_plan.model_dump(
-                        mode="json"
-                    )
+                    payload["portfolio_compiled_plan"] = compiled_plan.model_dump(mode="json")
                 session.add(
                     PortfolioDecisionRecord(
                         id=str(decision.decision_id),
@@ -698,9 +690,7 @@ class Repository:
             # otherwise valid model response.
             for allocation in decision.allocations:
                 allocation_id = str(allocation.allocation_id)
-                allocation_record = await session.get(
-                    PortfolioAllocationRecord, allocation_id
-                )
+                allocation_record = await session.get(PortfolioAllocationRecord, allocation_id)
                 if allocation_record is None:
                     session.add(
                         PortfolioAllocationRecord(
@@ -717,9 +707,7 @@ class Repository:
                     )
             await session.commit()
 
-    async def get_portfolio_replay_input(
-        self, decision_id: str
-    ) -> dict[str, object] | None:
+    async def get_portfolio_replay_input(self, decision_id: str) -> dict[str, object] | None:
         """Return the immutable Portfolio-v1 replay envelope, if it was captured.
 
         Older decisions predate the capture field and intentionally cannot be
@@ -1001,9 +989,7 @@ class Repository:
             await session.commit()
         return inserted
 
-    async def list_income_ledger(
-        self, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    async def list_income_ledger(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
         records = await self._income_ledger_records(start_date, end_date)
         return [
             {
@@ -1018,9 +1004,7 @@ class Repository:
             for record in records
         ]
 
-    async def list_daily_pnl(
-        self, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    async def list_daily_pnl(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
         records = await self._income_ledger_records(start_date, end_date)
         supported_types = {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
         timezone = ZoneInfo(self.timezone_name)
@@ -1066,9 +1050,7 @@ class Repository:
             )
         return sorted(result, key=lambda row: (row["date"], row["asset"]), reverse=True)
 
-    async def list_trade_pnl(
-        self, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    async def list_trade_pnl(self, start_date: date, end_date: date) -> list[dict[str, Any]]:
         records = await self._income_ledger_records(start_date, end_date)
         supported_types = {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}
         grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -1418,6 +1400,57 @@ class Repository:
                     "status": record.status,
                     "parameters": record.parameters,
                     "metrics": record.metrics,
+                    "created_at": record.created_at,
+                    "completed_at": record.completed_at,
+                }
+                for record in result.scalars()
+            ]
+
+    async def create_factor_research_run(self, parameters: dict[str, object]) -> str:
+        async with self.database.sessions() as session:
+            record = FactorResearchRunRecord(status="QUEUED", parameters=parameters, report={})
+            session.add(record)
+            await session.commit()
+            return record.id
+
+    async def set_factor_research_running(self, run_id: str) -> None:
+        async with self.database.sessions() as session:
+            record = await session.get(FactorResearchRunRecord, run_id)
+            if record is not None:
+                record.status = "RUNNING"
+                await session.commit()
+
+    async def complete_factor_research(self, run_id: str, report: dict[str, object]) -> None:
+        async with self.database.sessions() as session:
+            record = await session.get(FactorResearchRunRecord, run_id)
+            if record is not None:
+                record.status = "COMPLETED"
+                record.report = report
+                record.completed_at = datetime.now(UTC)
+                await session.commit()
+
+    async def fail_factor_research(self, run_id: str, reason: str) -> None:
+        async with self.database.sessions() as session:
+            record = await session.get(FactorResearchRunRecord, run_id)
+            if record is not None:
+                record.status = "FAILED"
+                record.report = {"error": reason}
+                record.completed_at = datetime.now(UTC)
+                await session.commit()
+
+    async def list_factor_research_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorResearchRunRecord)
+                .order_by(desc(FactorResearchRunRecord.created_at))
+                .limit(limit)
+            )
+            return [
+                {
+                    "id": record.id,
+                    "status": record.status,
+                    "parameters": record.parameters,
+                    "report": record.report,
                     "created_at": record.created_at,
                     "completed_at": record.completed_at,
                 }

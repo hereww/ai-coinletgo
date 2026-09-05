@@ -12,6 +12,7 @@ const PortfolioPage = lazy(() => import('./pages/PortfolioPage'))
 const PositionsPage = lazy(() => import('./pages/PositionsPage'))
 const OrdersPage = lazy(() => import('./pages/OrdersPage'))
 const ReplayPage = lazy(() => import('./pages/ReplayPage'))
+const FactorResearchPage = lazy(() => import('./pages/FactorResearchPage'))
 const RiskPage = lazy(() => import('./pages/RiskPage'))
 const AuditPage = lazy(() => import('./pages/AuditPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
@@ -58,6 +59,7 @@ function App() {
           <Route path="/positions" element={<PositionsPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/replay" element={<ReplayPage />} />
+          <Route path="/factors" element={<FactorResearchPage />} />
           <Route path="/risk" element={<RiskPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/settings" element={<SettingsPage />} />

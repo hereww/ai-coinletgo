@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from trading_system.api.schemas import (
     ConfigUpdateRequest,
+    FactorResearchRequest,
     IntegrationProbeRequest,
     ManualEntryAdviceRequest,
     ManualEntryRequest,
@@ -19,6 +20,28 @@ from trading_system.api.schemas import (
 from trading_system.config import Settings
 from trading_system.domain.enums import PositionSide, ReviewAction
 from trading_system.domain.models import ManualEntryAdvice, PositionReview, RiskLimits
+
+
+def test_factor_research_request_normalizes_symbols_and_bounds_work() -> None:
+    request = FactorResearchRequest(
+        symbols=[" btcusdt ", "ETHUSDT", "btcusdt", "SOLUSDT"],
+        start_date="2025-01-01",
+        end_date="2025-02-01",
+    )
+    assert request.symbols == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+    with pytest.raises(ValueError, match="at least 3 items"):
+        FactorResearchRequest(
+            symbols=["BTCUSDT", "ETHUSDT"],
+            start_date="2025-01-01",
+            end_date="2025-02-01",
+        )
+    with pytest.raises(ValueError, match="cannot precede"):
+        FactorResearchRequest(
+            symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+            start_date="2025-02-01",
+            end_date="2025-01-01",
+        )
 
 
 def test_replay_request_accepts_inclusive_year_and_rejects_invalid_ranges() -> None:

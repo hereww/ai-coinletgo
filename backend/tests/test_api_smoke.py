@@ -86,3 +86,54 @@ def test_scan_interval_accepts_the_supported_cadence_set() -> None:
                 client.patch("/api/v1/config", json={"scan_interval_minutes": interval}).status_code
                 == 422
             )
+
+
+def test_factor_catalog_exposes_research_only_data_boundaries() -> None:
+    with TestClient(app) as client:
+        response = client.get("/api/v1/factors/catalog")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["live_trading_connected"] is False
+    assert payload["market_source"] == "Binance USD-M production public market data"
+    assert len(payload["factors"]) == 12
+    sources = {item["key"]: item for item in payload["data_sources"]}
+    assert sources["funding"]["available"] is True
+    assert sources["open_interest"]["available"] is False
+    assert sources["basis"]["available"] is False
+    assert sources["order_book"]["available"] is False
+
+
+def test_factor_research_endpoint_passes_validated_parameters_to_service() -> None:
+    captured: dict[str, object] = {}
+
+    class StubFactorResearch:
+        async def create(self, parameters: dict[str, object]) -> str:
+            captured.update(parameters)
+            return "factor-run-1"
+
+        async def execute(self, run_id: str, parameters: dict[str, object]) -> None:
+            captured["executed_run_id"] = run_id
+            captured["executed_parameters"] = parameters
+
+    with TestClient(app) as client:
+        app.state.factor_research_service = StubFactorResearch()
+        response = client.post(
+            "/api/v1/factors/research",
+            json={
+                "symbols": ["btcusdt", "ETHUSDT", "SOLUSDT"],
+                "start_date": "2025-01-01",
+                "end_date": "2025-02-01",
+                "interval": "4h",
+                "forward_bars": 6,
+                "rebalance_bars": 6,
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json()["id"] == "factor-run-1"
+    assert response.json()["status"] == "QUEUED"
+    assert captured["symbols"] == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    assert captured["interval"] == "4h"
+    assert captured["forward_bars"] == 6
+    assert captured["executed_run_id"] == "factor-run-1"

@@ -50,9 +50,9 @@ class ModelRelayUpdateRequest(BaseModel):
     model_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:/-]+$")
     reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
     timeout_seconds: float = Field(default=45.0, gt=1, le=120)
-    strategy_profile: Literal[
-        "conservative", "balanced", "trend_following", "scalping"
-    ] = "trend_following"
+    strategy_profile: Literal["conservative", "balanced", "trend_following", "scalping"] = (
+        "trend_following"
+    )
 
     @field_validator("base_url")
     @classmethod
@@ -103,9 +103,7 @@ class ConfigUpdateRequest(BaseModel):
     high_volatility_risk_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
     entry_symbols: list[str] | None = Field(default=None, max_length=30)
     portfolio_strategy_enabled: bool | None = None
-    portfolio_rebalance_deadband_fraction: Decimal | None = Field(
-        default=None, ge=0, le=1
-    )
+    portfolio_rebalance_deadband_fraction: Decimal | None = Field(default=None, ge=0, le=1)
     portfolio_rebalance_cooldown_minutes: int | None = Field(default=None, ge=0, le=1_440)
     hft_enabled: bool | None = None
     hft_dry_run: bool | None = None
@@ -174,8 +172,7 @@ class ConfigUpdateRequest(BaseModel):
         if (
             self.volatility_soft_limit_percentile is not None
             and self.volatility_hard_limit_percentile is not None
-            and self.volatility_soft_limit_percentile
-            > self.volatility_hard_limit_percentile
+            and self.volatility_soft_limit_percentile > self.volatility_hard_limit_percentile
         ):
             raise ValueError(
                 "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
@@ -253,8 +250,7 @@ class ReplayBacktestConfigRequest(BaseModel):
         if (
             self.volatility_soft_limit_percentile is not None
             and self.volatility_hard_limit_percentile is not None
-            and self.volatility_soft_limit_percentile
-            > self.volatility_hard_limit_percentile
+            and self.volatility_soft_limit_percentile > self.volatility_hard_limit_percentile
         ):
             raise ValueError(
                 "volatility_soft_limit_percentile cannot exceed volatility_hard_limit_percentile"
@@ -308,6 +304,48 @@ class ReplayRequest(BaseModel):
                 raise ValueError("replay range cannot exceed 366 days")
         elif self.portfolio_decision_id is None:
             raise ValueError("recorded_portfolio replay requires portfolio_decision_id")
+        return self
+
+
+class FactorResearchRequest(BaseModel):
+    """Bounded cross-sectional factor research over public market history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbols: list[str] = Field(min_length=3, max_length=20)
+    start_date: date
+    end_date: date
+    interval: Literal["1h", "4h"] = "1h"
+    forward_bars: int = Field(default=24, ge=1, le=96)
+    rebalance_bars: int = Field(default=24, ge=1, le=96)
+    winsorize_quantile: Decimal = Field(default=Decimal("0.05"), ge=0, le=Decimal("0.2"))
+    min_cross_section: int = Field(default=3, ge=3, le=20)
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def normalize_symbols(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, list):
+            return value
+        normalized: list[str] = []
+        for item in value:
+            symbol = str(item).strip().upper()
+            valid = symbol.isascii() and symbol.isalnum() and 5 <= len(symbol) <= 20
+            if symbol and not valid:
+                raise ValueError("symbols must contain valid Binance symbols")
+            if symbol and symbol not in normalized:
+                normalized.append(symbol)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_research_window(self) -> FactorResearchRequest:
+        if self.end_date < self.start_date:
+            raise ValueError("end_date cannot precede start_date")
+        if (self.end_date - self.start_date).days > 365:
+            raise ValueError("factor research range cannot exceed 366 days")
+        if self.min_cross_section > len(self.symbols):
+            raise ValueError("min_cross_section cannot exceed symbol count")
         return self
 
 

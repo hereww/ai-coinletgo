@@ -180,6 +180,18 @@ class ReplayRunRecord(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class FactorResearchRunRecord(Base):
+    __tablename__ = "factor_research_runs"
+    __table_args__ = (Index("ix_factor_research_created_at", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    parameters: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    report: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class EquityCheckpointRecord(Base):
     __tablename__ = "equity_checkpoints"
 

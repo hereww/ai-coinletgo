@@ -464,9 +464,7 @@ async def test_order_portfolio_lineage_round_trips_and_legacy_orders_remain_comp
     )
     try:
         await repository.save_orders([portfolio_order, legacy_order])
-        rows = {
-            str(row["client_order_id"]): row for row in await repository.list_orders()
-        }
+        rows = {str(row["client_order_id"]): row for row in await repository.list_orders()}
     finally:
         await database.dispose()
 
@@ -476,3 +474,30 @@ async def test_order_portfolio_lineage_round_trips_and_legacy_orders_remain_comp
     assert rows["legacy-entry"]["portfolio_decision_id"] is None
     assert rows["legacy-entry"]["portfolio_allocation_id"] is None
     assert rows["legacy-entry"]["action_sequence"] is None
+
+
+@pytest.mark.asyncio
+async def test_factor_research_run_lifecycle_is_persisted(tmp_path: object) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'factor-runs.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    parameters: dict[str, object] = {
+        "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        "interval": "1h",
+    }
+    try:
+        completed_id = await repository.create_factor_research_run(parameters)
+        await repository.set_factor_research_running(completed_id)
+        await repository.complete_factor_research(completed_id, {"summary": {"factor_count": 12}})
+        failed_id = await repository.create_factor_research_run(parameters)
+        await repository.fail_factor_research(failed_id, "market source unavailable")
+        rows = await repository.list_factor_research_runs()
+    finally:
+        await database.dispose()
+
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[completed_id]["status"] == "COMPLETED"
+    assert by_id[completed_id]["report"] == {"summary": {"factor_count": 12}}
+    assert by_id[completed_id]["completed_at"] is not None
+    assert by_id[failed_id]["status"] == "FAILED"
+    assert by_id[failed_id]["report"] == {"error": "market source unavailable"}

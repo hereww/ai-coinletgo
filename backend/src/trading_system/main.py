@@ -18,6 +18,7 @@ from trading_system.exchange.binance import BinanceUSDMarketClient
 from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.database import Database
 from trading_system.persistence.repository import Repository
+from trading_system.strategy.factor_service import FactorResearchService
 
 
 @asynccontextmanager
@@ -35,9 +36,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     repository = Repository(database)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
+    research_exchange = BinanceUSDMarketClient(
+        settings,
+        public_base_url=settings.binance_live_base_url,
+    )
     model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
     replay_service = ReplayService(repository, exchange, notifier, settings)
+    factor_research_service = FactorResearchService(
+        repository, research_exchange, settings.app_timezone
+    )
     controller = SystemController(settings, database, redis, repository, exchange, model)
 
     app.state.settings = settings
@@ -45,15 +53,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = redis
     app.state.repository = repository
     app.state.exchange = exchange
+    app.state.research_exchange = research_exchange
     app.state.model = model
     app.state.security = security
     app.state.controller = controller
     app.state.notifier = notifier
     app.state.replay_service = replay_service
+    app.state.factor_research_service = factor_research_service
     yield
 
     await model.close()
     await notifier.close()
+    await research_exchange.close()
     await exchange.close()
     await redis.aclose()
     await database.dispose()

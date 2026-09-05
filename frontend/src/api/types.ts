@@ -358,6 +358,107 @@ export interface ReplayRun {
   completed_at: string | null
 }
 
+export interface FactorDefinition {
+  key: string
+  label: string
+  category: string
+  description: string
+  required_data: string[]
+}
+
+export interface FactorDataSource {
+  key: string
+  label: string
+  available: boolean
+  detail: string
+}
+
+export interface FactorCatalog {
+  factors: FactorDefinition[]
+  data_sources: FactorDataSource[]
+  market_source: string
+  live_trading_connected: false
+}
+
+export interface FactorResearchRequest {
+  symbols: string[]
+  start_date: string
+  end_date: string
+  interval: '1h' | '4h'
+  forward_bars: number
+  rebalance_bars: number
+  winsorize_quantile: string
+  min_cross_section: number
+}
+
+export interface FactorResearchResult {
+  generated_at: string
+  summary: {
+    factor_count: number
+    passed: number
+    watch: number
+    insufficient: number
+    unavailable: number
+    timestamps_evaluated: number
+    total_observations: number
+  }
+  factors: Array<{
+    key: string
+    label: string
+    category: string
+    description: string
+    required_data: string[]
+    source_available: boolean
+    status: 'PASSED' | 'WATCH' | 'INSUFFICIENT' | 'UNAVAILABLE'
+    direction: 'POSITIVE' | 'NEGATIVE'
+    mean_ic: number | null
+    ic_std: number | null
+    icir: number | null
+    positive_ic_rate: number | null
+    in_sample_ic: number | null
+    out_of_sample_ic: number | null
+    p_value: number | null
+    q_value: number | null
+    turnover: number | null
+    timestamp_count: number
+    observation_count: number
+    decay: Array<{ forward_bars: number; mean_ic: number | null; timestamp_count: number }>
+    unavailable_reason: string | null
+    gates: Record<string, boolean>
+  }>
+  methodology: {
+    signal_timing: string
+    target: string
+    correlation: string
+    normalization: string
+    validation: string
+    multiple_testing: string
+    icir: string
+    pass_rule: string
+  }
+  parameters: FactorResearchRequest
+  data_sources: FactorDataSource[]
+  market_source: string
+  live_trading_connected: false
+}
+
+export type FactorResearchStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+
+export interface FactorResearchSubmission {
+  id: string
+  status: FactorResearchStatus
+  parameters: FactorResearchRequest
+}
+
+export interface FactorResearchRun {
+  id: string
+  status: FactorResearchStatus
+  parameters: FactorResearchRequest
+  report: FactorResearchResult | { error?: string }
+  created_at: string
+  completed_at: string | null
+}
+
 export interface IntegrationStatus {
   proxy: {
     enabled: boolean

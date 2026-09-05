@@ -2,6 +2,10 @@ import type {
   AuditEvent,
   DailyPnlRow,
   DashboardData,
+  FactorCatalog,
+  FactorResearchRequest,
+  FactorResearchRun,
+  FactorResearchSubmission,
   IncomeLedgerRow,
   IntegrationStatus,
   ManualEntryAdvice,
@@ -326,4 +330,11 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   replays: () => request<ReplayRun[]>('/api/v1/replays'),
+  factorCatalog: () => request<FactorCatalog>('/api/v1/factors/catalog'),
+  researchFactors: (payload: FactorResearchRequest) =>
+    request<FactorResearchSubmission>('/api/v1/factors/research', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  factorResearchRuns: () => request<FactorResearchRun[]>('/api/v1/factors/research'),
 }

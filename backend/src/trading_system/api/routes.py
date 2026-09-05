@@ -9,6 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from trading_system.api.controller import SystemController
 from trading_system.api.schemas import (
     ConfigUpdateRequest,
+    FactorResearchRequest,
     IntegrationProbeRequest,
     LoginRequest,
     ManualEntryAdviceRequest,
@@ -25,6 +26,7 @@ from trading_system.backtest.service import ReplayService
 from trading_system.config import Settings
 from trading_system.exchange.base import ExchangeError
 from trading_system.persistence.repository import Repository
+from trading_system.strategy.factor_service import FactorResearchService
 
 router = APIRouter(prefix="/api/v1")
 
@@ -49,11 +51,16 @@ def replay_service(request: Request) -> ReplayService:
     return cast(ReplayService, request.app.state.replay_service)
 
 
+def factor_research_service(request: Request) -> FactorResearchService:
+    return cast(FactorResearchService, request.app.state.factor_research_service)
+
+
 Controller = Annotated[SystemController, Depends(controller)]
 Repo = Annotated[Repository, Depends(repository)]
 AppSettings = Annotated[Settings, Depends(settings)]
 Security = Annotated[SecurityService, Depends(security_service)]
 Replays = Annotated[ReplayService, Depends(replay_service)]
+FactorResearch = Annotated[FactorResearchService, Depends(factor_research_service)]
 
 
 def validate_pnl_date_range(start_date: date, end_date: date) -> None:
@@ -71,9 +78,9 @@ def validate_pnl_date_range(start_date: date, end_date: date) -> None:
 
 def pnl_window_ms(start_date: date, end_date: date, timezone_name: str) -> tuple[int, int]:
     timezone = ZoneInfo(timezone_name)
-    start = datetime(
-        start_date.year, start_date.month, start_date.day, tzinfo=timezone
-    ).astimezone(UTC)
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone).astimezone(
+        UTC
+    )
     end_day = end_date + timedelta(days=1)
     end = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone).astimezone(UTC)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
@@ -100,9 +107,7 @@ async def login(
 ) -> dict[str, str]:
     client_ip = request.client.host if request.client else "unknown"
     try:
-        session_token, csrf_token = security.login(
-            payload.username, payload.password, client_ip
-        )
+        session_token, csrf_token = security.login(payload.username, payload.password, client_ip)
     except HTTPException:
         await repo.audit(
             actor="anonymous",
@@ -436,9 +441,8 @@ async def update_config(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Password verification failed")
     updates = payload.model_dump(exclude_none=True, exclude={"password"})
     if (
-        (updates.get("portfolio_strategy_enabled") or updates.get("hft_enabled"))
-        and app_settings.binance_environment != "testnet"
-    ):
+        updates.get("portfolio_strategy_enabled") or updates.get("hft_enabled")
+    ) and app_settings.binance_environment != "testnet":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "Portfolio-v1 and HFT strategies are limited to Binance testnet",
@@ -525,7 +529,8 @@ async def update_config(
                 "hft_max_consecutive_losses",
             }
             else float(value)
-            if key not in {
+            if key
+            not in {
                 "entry_direction",
                 "entry_trigger",
                 "entry_symbols",
@@ -859,3 +864,36 @@ async def create_replay(
 @router.get("/replays")
 async def list_replays(repo: Repo, _: CurrentUser) -> list[dict[str, Any]]:
     return await repo.list_replays()
+
+
+@router.get("/factors/catalog")
+async def factor_catalog(research: FactorResearch, _: CurrentUser) -> dict[str, object]:
+    return research.catalog()
+
+
+@router.post("/factors/research", status_code=status.HTTP_202_ACCEPTED)
+async def research_factors(
+    payload: FactorResearchRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    research: FactorResearch,
+    user: MutatingUser,
+    repo: Repo,
+) -> dict[str, Any]:
+    parameters = payload.model_dump(mode="json")
+    run_id = await research.create(parameters)
+    background_tasks.add_task(research.execute, run_id, parameters)
+    await repo.audit(
+        actor=user.username,
+        action="create_factor_research",
+        resource=run_id,
+        outcome="queued",
+        detail={"symbols": payload.symbols, "interval": payload.interval},
+        ip_address=request.client.host if request.client else None,
+    )
+    return {"id": run_id, "status": "QUEUED", "parameters": parameters}
+
+
+@router.get("/factors/research")
+async def list_factor_research(repo: Repo, _: CurrentUser, limit: int = 20) -> list[dict[str, Any]]:
+    return await repo.list_factor_research_runs(limit=min(max(limit, 1), 50))

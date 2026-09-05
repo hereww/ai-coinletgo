@@ -39,11 +39,13 @@ class BinanceUSDMarketClient(ExchangeGateway):
         self,
         settings: Settings,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        public_base_url: str | None = None,
     ) -> None:
         self.settings = settings
-        self.api_key = settings.binance_api_key or ""
-        self.api_secret = settings.binance_api_secret or ""
-        self.base_url = settings.binance_base_url
+        self.api_key = "" if public_base_url else settings.binance_api_key or ""
+        self.api_secret = "" if public_base_url else settings.binance_api_secret or ""
+        self.base_url = (public_base_url or settings.binance_base_url).rstrip("/")
         self.time_offset_ms = 0
         self.http = httpx.AsyncClient(
             base_url=self.base_url,
@@ -262,8 +264,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             {
                 str(row.get("symbol"))
                 for row in rows
-                if isinstance(row, dict)
-                and Decimal(str(row.get("positionAmt", "0"))) != 0
+                if isinstance(row, dict) and Decimal(str(row.get("positionAmt", "0"))) != 0
             }
         )
         algo_batches = await asyncio.gather(
@@ -291,9 +292,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 or order.get("positionSide") not in {"LONG", "SHORT"}
             ):
                 continue
-            trigger = Decimal(
-                str(order.get("triggerPrice") or order.get("stopPrice") or "0")
-            )
+            trigger = Decimal(str(order.get("triggerPrice") or order.get("stopPrice") or "0"))
             if trigger <= 0:
                 continue
             key = (str(order["symbol"]), str(order["positionSide"]))
@@ -322,13 +321,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             take_profit_orders = take_profit_by_key.get((row["symbol"], side.value), [])
             take_profits = sorted(
                 {
-                    Decimal(
-                        str(
-                            order.get("triggerPrice")
-                            or order.get("stopPrice")
-                            or "0"
-                        )
-                    )
+                    Decimal(str(order.get("triggerPrice") or order.get("stopPrice") or "0"))
                     for order in take_profit_orders
                 },
                 reverse=side == PositionSide.SHORT,
@@ -339,9 +332,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             # and could close another tranche immediately.
             staged_take_profits: dict[str, Decimal] = {}
             for order in take_profit_orders:
-                trigger = Decimal(
-                    str(order.get("triggerPrice") or order.get("stopPrice") or "0")
-                )
+                trigger = Decimal(str(order.get("triggerPrice") or order.get("stopPrice") or "0"))
                 client_id = self._algo_client_id(order)
                 if client_id.endswith("_t1"):
                     staged_take_profits["t1"] = trigger
@@ -379,12 +370,10 @@ class BinanceUSDMarketClient(ExchangeGateway):
                             error,
                         )
                     else:
-                        tp1_completed, tp1_status_known = (
-                            self._tp1_completion_from_history(
-                                history,
-                                symbol=str(row["symbol"]),
-                                position_side=side.value,
-                            )
+                        tp1_completed, tp1_status_known = self._tp1_completion_from_history(
+                            history,
+                            symbol=str(row["symbol"]),
+                            position_side=side.value,
                         )
             risk_per_unit = max(Decimal("0.00000001"), abs(entry - stop))
             direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
@@ -416,9 +405,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         )
         return positions
 
-    async def cancel_orphan_protection_orders(
-        self, active_positions: set[tuple[str, str]]
-    ) -> int:
+    async def cancel_orphan_protection_orders(self, active_positions: set[tuple[str, str]]) -> int:
         """Remove managed Algo protections that no longer have an exchange position."""
         orders = await self._all_open_algo_orders()
         canceled = 0
@@ -470,8 +457,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 or not symbol.isalnum()
                 or symbol != symbol.upper()
                 or not 5 <= len(symbol) <= 20
-                or
-                symbol_info.get("quoteAsset") != "USDT"
+                or symbol_info.get("quoteAsset") != "USDT"
                 or symbol_info.get("contractType") != "PERPETUAL"
                 or symbol_info.get("status") != "TRADING"
                 or symbol not in ticker_map
@@ -493,8 +479,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 funding_rate = Decimal(str(premium["lastFundingRate"]))
                 listing_days = max(
                     0,
-                    (now_ms - int(symbol_info.get("onboardDate", now_ms)))
-                    // 86_400_000,
+                    (now_ms - int(symbol_info.get("onboardDate", now_ms))) // 86_400_000,
                 )
                 # A crossed/inverted book or non-finite numeric value is a
                 # transient exchange-data race, not a valid zero/negative
@@ -831,9 +816,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             body = await self._request("POST", "/fapi/v1/order", parameters, signed=True)
         except ExchangeError as error:
             if self._is_ambiguous_write_error(error):
-                return await self._resolve_ambiguous_order(
-                    intent.symbol, client_order_id, error
-                )
+                return await self._resolve_ambiguous_order(intent.symbol, client_order_id, error)
             if "duplicate" not in str(error).lower():
                 raise
             body = await self._request(
@@ -869,9 +852,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
     ) -> list[OrderState]:
         lock = self._protection_lock(intent.symbol, intent.side.value)
         async with lock:
-            return await self._upsert_protection_unlocked(
-                intent, filled_quantity, average_price
-            )
+            return await self._upsert_protection_unlocked(intent, filled_quantity, average_price)
 
     def _protection_lock(self, symbol: str, position_side: str) -> asyncio.Lock:
         """Return the per-symbol/side lock shared by every protection mutation.
@@ -893,17 +874,13 @@ class BinanceUSDMarketClient(ExchangeGateway):
         filters = await self.get_filters(intent.symbol)
         stop_rounding = ROUND_UP if intent.side == PositionSide.LONG else ROUND_DOWN
         target_rounding = ROUND_DOWN if intent.side == PositionSide.LONG else ROUND_UP
-        stop_price = self._round_price(
-            intent.stop_price, filters.tick_size, stop_rounding
-        )
+        stop_price = self._round_price(intent.stop_price, filters.tick_size, stop_rounding)
         tp1_price = (
             self._round_price(raw_tp1_price, filters.tick_size, target_rounding)
             if raw_tp1_price is not None
             else None
         )
-        tp2_price = self._round_price(
-            intent.tp2_price, filters.tick_size, target_rounding
-        )
+        tp2_price = self._round_price(intent.tp2_price, filters.tick_size, target_rounding)
         self._validate_take_profit_geometry(intent, tp1_price, tp2_price)
         q1 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
         q2 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
@@ -1068,18 +1045,13 @@ class BinanceUSDMarketClient(ExchangeGateway):
                     "GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol}, signed=True
                 )
             )
-            active_ids = {
-                self._algo_client_id(order)
-                for order in last
-                if self._algo_active(order)
-            }
+            active_ids = {self._algo_client_id(order) for order in last if self._algo_active(order)}
             if not active_ids.intersection(canceled_ids):
                 return last
         lingering = sorted(
             self._algo_client_id(order)
             for order in last
-            if self._algo_active(order)
-            and self._algo_client_id(order) in canceled_ids
+            if self._algo_active(order) and self._algo_client_id(order) in canceled_ids
         )
         raise ExchangeError(
             "managed protection cancellation not confirmed: " + ", ".join(lingering)
@@ -1137,9 +1109,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             )
 
     @staticmethod
-    def _tp1_for_fill(
-        intent: ExecutionIntent, average_price: Decimal
-    ) -> Decimal | None:
+    def _tp1_for_fill(intent: ExecutionIntent, average_price: Decimal) -> Decimal | None:
         """Derive the 1R tranche from the actual weighted fill price.
 
         A limit entry may fill anywhere inside the approved interval.  Using a
@@ -1173,13 +1143,9 @@ class BinanceUSDMarketClient(ExchangeGateway):
         if tp1_price is None:
             return
         if intent.side == PositionSide.LONG and tp1_price >= tp2_price:
-            raise ExchangeError(
-                "take-profit invariant violated: LONG requires TP1 below TP2"
-            )
+            raise ExchangeError("take-profit invariant violated: LONG requires TP1 below TP2")
         if intent.side == PositionSide.SHORT and tp2_price >= tp1_price:
-            raise ExchangeError(
-                "take-profit invariant violated: SHORT requires TP2 below TP1"
-            )
+            raise ExchangeError("take-profit invariant violated: SHORT requires TP2 below TP1")
 
     async def close_position_market(self, position: PositionState, reason: str) -> OrderState:
         return await self.close_position_quantity_market(position, position.quantity, reason)
@@ -1187,9 +1153,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
     async def close_position_market_orders(
         self, position: PositionState, reason: str
     ) -> list[OrderState]:
-        return await self.close_position_quantity_market_orders(
-            position, position.quantity, reason
-        )
+        return await self.close_position_quantity_market_orders(position, position.quantity, reason)
 
     async def place_limit_exit(
         self,
@@ -1228,9 +1192,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             # position" response as an idempotent no-op.
             self._invalidate_position_cache()
             if self._is_ambiguous_write_error(error):
-                return await self._resolve_ambiguous_order(
-                    position.symbol, client_order_id, error
-                )
+                return await self._resolve_ambiguous_order(position.symbol, client_order_id, error)
             if "duplicate" not in str(error).lower():
                 raise
             body = await self._request(
@@ -1248,9 +1210,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         quantity: Decimal,
         operation_id: str,
     ) -> OrderState:
-        orders = await self.close_position_quantity_market_orders(
-            position, quantity, operation_id
-        )
+        orders = await self.close_position_quantity_market_orders(position, quantity, operation_id)
         return orders[-1]
 
     async def close_position_quantity_market_orders(
@@ -1317,9 +1277,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             self._invalidate_position_cache()
             filled = min(chunk, state.filled_quantity)
             if filled <= 0:
-                raise ExchangeError(
-                    f"market close order {client_order_id} returned no fill"
-                )
+                raise ExchangeError(f"market close order {client_order_id} returned no fill")
             remaining -= filled
             part += 1
         if not orders:
@@ -1530,9 +1488,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         canceled_stop_ids.add(self._algo_client_id(old_stop))
         try:
             refreshed_mark = await self.get_mark_price(position.symbol)
-            if (
-                position.side == PositionSide.LONG and new_stop >= refreshed_mark
-            ) or (
+            if (position.side == PositionSide.LONG and new_stop >= refreshed_mark) or (
                 position.side == PositionSide.SHORT and new_stop <= refreshed_mark
             ):
                 raise ExchangeError(
@@ -1751,10 +1707,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
 
         latest = max(candidates, key=order_time)
         status = str(
-            latest.get("algoStatus")
-            or latest.get("status")
-            or latest.get("triggerStatus")
-            or ""
+            latest.get("algoStatus") or latest.get("status") or latest.get("triggerStatus") or ""
         ).upper()
         if status in {"FINISHED", "FILLED"}:
             return True, True
@@ -1824,9 +1777,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         }
         status = str(row.get("algoStatus") or row.get("status") or "NEW").upper()
         client_id = str(
-            row.get("clientAlgoId")
-            or row.get("clientOrderId")
-            or fallback.get("clientAlgoId", "")
+            row.get("clientAlgoId") or row.get("clientOrderId") or fallback.get("clientAlgoId", "")
         )
         symbol = str(row.get("symbol") or fallback.get("symbol", ""))
         side = str(row.get("side") or fallback.get("side", ""))
