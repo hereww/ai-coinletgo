@@ -6,6 +6,7 @@ import { AppShell } from './AppShell'
 it('opens mobile navigation, closes with Escape, and restores focus', () => {
   render(<BrowserRouter><AppShell user="operator" environment="live"><div>content</div></AppShell></BrowserRouter>)
   expect(screen.getByText('实盘环境')).toBeInTheDocument()
+  expect(screen.getByText('测试跑通版本 1.0')).toBeInTheDocument()
   const menuButton = screen.getByRole('button', { name: '打开导航' })
   fireEvent.click(menuButton)
   expect(menuButton).toHaveAttribute('aria-expanded', 'true')

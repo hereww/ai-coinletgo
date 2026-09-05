@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
+from trading_system import __version__
 from trading_system.ai.client import ResponsesModelClient
 from trading_system.api.controller import SystemController
 from trading_system.api.routes import router
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
-    version="0.1.0",
+    version=__version__,
     docs_url="/api/docs" if settings.app_env != "production" else None,
     redoc_url=None,
     lifespan=lifespan,

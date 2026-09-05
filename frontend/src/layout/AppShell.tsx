@@ -77,7 +77,7 @@ export function AppShell({ children, user, environment, healthReady }: { childre
         </nav>
         <div className="sidebar-foot">
           <div className="operator-line"><span className="operator-dot" />{user}</div>
-          <div className="version-line">console v0.1</div>
+          <div className="version-line">测试跑通版本 1.0</div>
         </div>
       </aside>
 
