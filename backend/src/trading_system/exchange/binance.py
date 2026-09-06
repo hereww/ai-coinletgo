@@ -41,6 +41,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         transport: httpx.AsyncBaseTransport | None = None,
         *,
         public_base_url: str | None = None,
+        proxy_url: str | None = None,
     ) -> None:
         self.settings = settings
         self.api_key = "" if public_base_url else settings.binance_api_key or ""
@@ -52,7 +53,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
             timeout=15,
             transport=transport,
             headers={"X-MBX-APIKEY": self.api_key},
-            proxy=settings.binance_http_proxy_url,
+            proxy=settings.binance_http_proxy_url if proxy_url is None else proxy_url,
             trust_env=False,
         )
         self._filter_cache: dict[str, ExchangeFilters] = {}

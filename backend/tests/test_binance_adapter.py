@@ -103,6 +103,24 @@ async def test_binance_proxy_can_be_disabled_independently_of_model_proxy(
     finally:
         await client.close()
 
+
+@pytest.mark.asyncio
+async def test_public_client_can_use_shared_proxy_when_trading_proxy_is_disabled(
+    tmp_path: object,
+) -> None:
+    settings = proxy_exchange_settings(tmp_path)
+    settings.binance_http_proxy_enabled = False
+    client = BinanceUSDMarketClient(
+        settings,
+        public_base_url="https://fapi.binance.com",
+        proxy_url=settings.http_proxy_url,
+    )
+    try:
+        assert client.base_url == "https://fapi.binance.com"
+        assert client.http._mounts
+    finally:
+        await client.close()
+
     missing = tmp_path / "missing"
     missing.mkdir()
     missing.joinpath("binance_testnet_api_key").write_text("api-key", encoding="utf-8")

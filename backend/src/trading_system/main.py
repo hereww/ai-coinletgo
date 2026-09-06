@@ -39,6 +39,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     research_exchange = BinanceUSDMarketClient(
         settings,
         public_base_url=settings.binance_live_base_url,
+        # Factor research reads production public history. It may use the
+        # shared outbound proxy even when signed trading requests stay direct.
+        proxy_url=settings.http_proxy_url,
     )
     model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
