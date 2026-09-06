@@ -192,6 +192,17 @@ class FactorResearchRunRecord(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class FactorShadowRankingRecord(Base):
+    __tablename__ = "factor_shadow_rankings"
+    __table_args__ = (Index("ix_factor_shadow_timestamp", "timestamp"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    research_run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class EquityCheckpointRecord(Base):
     __tablename__ = "equity_checkpoints"
 

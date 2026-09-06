@@ -66,6 +66,9 @@ class MarketSnapshot(BaseModel):
     status: str = "TRADING"
     score: Decimal = Decimal("0")
     recent_returns_1h: list[Decimal] = Field(default_factory=list, exclude=True)
+    # Point-in-time factor values are kept in memory for the shadow ranking
+    # only. They are excluded from model inputs and ordinary market snapshots.
+    factor_values: dict[str, Decimal] = Field(default_factory=dict, exclude=True)
 
     @property
     def mid_price(self) -> Decimal:

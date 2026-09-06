@@ -501,3 +501,27 @@ async def test_factor_research_run_lifecycle_is_persisted(tmp_path: object) -> N
     assert by_id[completed_id]["completed_at"] is not None
     assert by_id[failed_id]["status"] == "FAILED"
     assert by_id[failed_id]["report"] == {"error": "market source unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_factor_shadow_ranking_is_persisted_and_listed(tmp_path: object) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'factor-shadow.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    timestamp = datetime(2026, 9, 5, tzinfo=UTC)
+    payload: dict[str, object] = {
+        "research_run_id": "factor-run-1",
+        "generated_at": timestamp.isoformat(),
+        "selected_factors": [{"key": "momentum_5d"}],
+        "rankings": [{"symbol": "BTCUSDT", "score": 0.5}],
+        "execution_effect": "shadow_only; does_not_change_candidates_or_orders",
+    }
+    try:
+        ranking_id = await repository.save_factor_shadow_ranking(payload)
+        rows = await repository.list_factor_shadow_rankings()
+    finally:
+        await database.dispose()
+
+    assert rows[0]["id"] == ranking_id
+    assert rows[0]["research_run_id"] == "factor-run-1"
+    assert rows[0]["payload"] == payload

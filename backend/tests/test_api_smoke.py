@@ -103,6 +103,10 @@ def test_factor_catalog_exposes_research_only_data_boundaries() -> None:
     assert sources["basis"]["available"] is False
     assert sources["order_book"]["available"] is False
 
+    shadow = client.get("/api/v1/factors/shadow")
+    assert shadow.status_code == 200
+    assert shadow.json() == []
+
 
 def test_factor_research_endpoint_passes_validated_parameters_to_service() -> None:
     captured: dict[str, object] = {}

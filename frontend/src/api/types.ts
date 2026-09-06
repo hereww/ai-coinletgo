@@ -389,6 +389,12 @@ export interface FactorResearchRequest {
   rebalance_bars: number
   winsorize_quantile: string
   min_cross_section: number
+  maker_fee_rate?: string
+  taker_fee_rate?: string
+  slippage_rate?: string
+  funding_rate_fallback?: string
+  walk_forward_folds?: number
+  portfolio_quantile?: string
 }
 
 export interface FactorResearchResult {
@@ -423,6 +429,11 @@ export interface FactorResearchResult {
     timestamp_count: number
     observation_count: number
     decay: Array<{ forward_bars: number; mean_ic: number | null; timestamp_count: number }>
+    walk_forward_oos_ic?: number | null
+    portfolio?: FactorPortfolioMetrics | null
+    portfolio_maker?: FactorPortfolioMetrics | null
+    walk_forward_portfolio?: FactorPortfolioMetrics | null
+    walk_forward?: Array<Record<string, unknown>>
     unavailable_reason: string | null
     gates: Record<string, boolean>
   }>
@@ -434,12 +445,33 @@ export interface FactorResearchResult {
     validation: string
     multiple_testing: string
     icir: string
+    portfolio?: string
+    cost_model?: string
+    maker_fee_rate?: string
+    taker_fee_rate?: string
+    slippage_rate?: string
+    funding_rate_fallback?: string
+    portfolio_quantile?: string
     pass_rule: string
   }
   parameters: FactorResearchRequest
   data_sources: FactorDataSource[]
   market_source: string
   live_trading_connected: false
+}
+
+export interface FactorPortfolioMetrics {
+  observations: number
+  gross_return: number | null
+  fee_cost: number | null
+  slippage_cost: number | null
+  funding_cost: number | null
+  net_return: number | null
+  average_turnover: number | null
+  total_turnover: number | null
+  max_drawdown: number | null
+  annualized_volatility: number | null
+  sharpe: number | null
 }
 
 export type FactorResearchStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
@@ -457,6 +489,25 @@ export interface FactorResearchRun {
   report: FactorResearchResult | { error?: string }
   created_at: string
   completed_at: string | null
+}
+
+export interface FactorShadowRanking {
+  id: string
+  research_run_id: string
+  timestamp: string
+  payload: {
+    research_run_id: string
+    generated_at: string
+    selected_factors: Array<{ key: string; label: string; direction: string }>
+    rankings: Array<{
+      symbol: string
+      score: number
+      factor_coverage: number
+      contributions: Record<string, number>
+    }>
+    execution_effect: string
+  }
+  created_at: string
 }
 
 export interface IntegrationStatus {

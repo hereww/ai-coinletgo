@@ -42,6 +42,12 @@ from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.repository import Repository
 from trading_system.risk.engine import RiskEngine
 from trading_system.risk.portfolio import PortfolioCompiler
+from trading_system.strategy.factor_research import build_factor_shadow_ranking
+from trading_system.strategy.factors import (
+    FactorBar,
+    compute_factor_values,
+    normalize_factor_values,
+)
 from trading_system.strategy.indicators import atr, pearson_correlation
 from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import build_snapshot
@@ -1337,11 +1343,11 @@ class TradingCycle:
                     self.exchange.get_open_interest(symbol),
                     self.exchange.get_book_depth(symbol),
                 )
-                values = cast(
+                gathered = cast(
                     tuple[Any, ...],
                     await asyncio.gather(*requests, return_exceptions=True),
                 )
-                for stage, value in zip(stages, values, strict=True):
+                for stage, value in zip(stages, gathered, strict=True):
                     if isinstance(value, asyncio.CancelledError):
                         raise value
                     if isinstance(value, BaseException):
@@ -1360,11 +1366,11 @@ class TradingCycle:
                     self._log_snapshot_failures(symbol, failures)
                     return None, failures
 
-                candles_15m = cast(list[Candle], values[0])
-                candles_1h = cast(list[Candle], values[1])
-                candles_4h = cast(list[Candle], values[2])
-                open_interest = cast(Decimal, values[3])
-                book_depth = cast(Decimal, values[4])
+                candles_15m = cast(list[Candle], gathered[0])
+                candles_1h = cast(list[Candle], gathered[1])
+                candles_4h = cast(list[Candle], gathered[2])
+                open_interest = cast(Decimal, gathered[3])
+                book_depth = cast(Decimal, gathered[4])
                 now = datetime.now(UTC)
                 candle_sets = (
                     ("candles_15m", candles_15m, timedelta(minutes=20)),
@@ -1450,6 +1456,39 @@ class TradingCycle:
                             str(self.settings.high_volatility_risk_multiplier)
                         ),
                     )
+                    factor_bars = [
+                        FactorBar(
+                            timestamp=candle.close_time,
+                            open=candle.open,
+                            high=candle.high,
+                            low=candle.low,
+                            close=candle.close,
+                            volume=candle.volume,
+                            funding_rate=(
+                                item.funding_rate
+                                if index == len(candles_1h) - 1
+                                else None
+                            ),
+                            funding_observed_at=(
+                                candle.close_time if index == len(candles_1h) - 1 else None
+                            ),
+                        )
+                        for index, candle in enumerate(candles_1h)
+                    ]
+                    values = normalize_factor_values(
+                        compute_factor_values(
+                            factor_bars,
+                            bars_per_day=24,
+                            bars_per_year=24 * 365,
+                        )
+                    )
+                    snapshot = snapshot.model_copy(
+                        update={
+                            "factor_values": {
+                                key: value for key, value in values.items() if value is not None
+                            }
+                        }
+                    )
                 except Exception as error:
                     failure = self._snapshot_failure(
                         symbol,
@@ -1487,6 +1526,22 @@ class TradingCycle:
                         failure.get("symbol"),
                         failure.get("stage"),
                     )
+        try:
+            completed_research = await self.repository.latest_completed_factor_research()
+            if completed_research is not None:
+                shadow = build_factor_shadow_ranking(snapshots, completed_research)
+                if shadow is not None:
+                    shadow_id = await self.repository.save_factor_shadow_ranking(shadow)
+                    logger.info(
+                        "factor shadow ranking saved id=%s research_run_id=%s symbols=%d",
+                        shadow_id,
+                        shadow.get("research_run_id"),
+                        len(shadow.get("rankings", [])),
+                    )
+        except Exception:
+            # Shadow analytics are strictly non-blocking. A persistence or
+            # report-shape failure must never halt market screening or entries.
+            logger.exception("factor shadow ranking unavailable")
         return snapshots
 
     @staticmethod

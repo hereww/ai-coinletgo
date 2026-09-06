@@ -87,6 +87,14 @@ class FactorResearchService:
                 rebalance_bars=int(str(parameters["rebalance_bars"])),
                 winsorize_quantile=Decimal(str(parameters["winsorize_quantile"])),
                 min_cross_section=int(str(parameters["min_cross_section"])),
+                maker_fee_rate=Decimal(str(parameters.get("maker_fee_rate", "0.0002"))),
+                taker_fee_rate=Decimal(str(parameters.get("taker_fee_rate", "0.0005"))),
+                slippage_rate=Decimal(str(parameters.get("slippage_rate", "0.0005"))),
+                funding_rate_fallback=Decimal(
+                    str(parameters.get("funding_rate_fallback", "0.0001"))
+                ),
+                walk_forward_folds=int(str(parameters.get("walk_forward_folds", 4))),
+                portfolio_quantile=Decimal(str(parameters.get("portfolio_quantile", "0.2"))),
             )
             await self.repository.complete_factor_research(run_id, report)
         except Exception as error:
@@ -103,6 +111,12 @@ class FactorResearchService:
         rebalance_bars: int,
         winsorize_quantile: Decimal,
         min_cross_section: int,
+        maker_fee_rate: Decimal = Decimal("0.0002"),
+        taker_fee_rate: Decimal = Decimal("0.0005"),
+        slippage_rate: Decimal = Decimal("0.0005"),
+        funding_rate_fallback: Decimal = Decimal("0.0001"),
+        walk_forward_folds: int = 4,
+        portfolio_quantile: Decimal = Decimal("0.2"),
     ) -> dict[str, Any]:
         bars_per_day_by_interval = {"1h": 24, "4h": 6}
         if interval not in bars_per_day_by_interval:
@@ -152,6 +166,12 @@ class FactorResearchService:
             rebalance_bars=rebalance_bars,
             min_cross_section=min_cross_section,
             winsorize_quantile=winsorize_quantile,
+            maker_fee_rate=maker_fee_rate,
+            taker_fee_rate=taker_fee_rate,
+            slippage_rate=slippage_rate,
+            funding_rate_fallback=funding_rate_fallback,
+            walk_forward_folds=walk_forward_folds,
+            portfolio_quantile=portfolio_quantile,
         )
         report["parameters"] = {
             "symbols": list(markets),
@@ -162,6 +182,12 @@ class FactorResearchService:
             "rebalance_bars": rebalance_bars,
             "winsorize_quantile": str(winsorize_quantile),
             "min_cross_section": min_cross_section,
+            "maker_fee_rate": str(Decimal(str(maker_fee_rate))),
+            "taker_fee_rate": str(Decimal(str(taker_fee_rate))),
+            "slippage_rate": str(Decimal(str(slippage_rate))),
+            "funding_rate_fallback": str(Decimal(str(funding_rate_fallback))),
+            "walk_forward_folds": walk_forward_folds,
+            "portfolio_quantile": str(Decimal(str(portfolio_quantile))),
         }
         report["data_sources"] = DATA_SOURCES
         report["market_source"] = "Binance USD-M production public market data"

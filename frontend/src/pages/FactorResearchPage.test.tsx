@@ -7,6 +7,7 @@ const apiMock = vi.hoisted(() => ({
   factorCatalog: vi.fn(),
   researchFactors: vi.fn(),
   factorResearchRuns: vi.fn(),
+  factorShadowRankings: vi.fn(),
 }))
 vi.mock('../api/client', () => ({ api: apiMock }))
 
@@ -85,6 +86,7 @@ beforeEach(() => {
   apiMock.factorCatalog.mockReset().mockResolvedValue(catalog)
   apiMock.researchFactors.mockReset().mockResolvedValue(submission)
   apiMock.factorResearchRuns.mockReset().mockResolvedValue([])
+  apiMock.factorShadowRankings.mockReset().mockResolvedValue([])
 })
 
 afterEach(cleanup)

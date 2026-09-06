@@ -897,3 +897,12 @@ async def research_factors(
 @router.get("/factors/research")
 async def list_factor_research(repo: Repo, _: CurrentUser, limit: int = 20) -> list[dict[str, Any]]:
     return await repo.list_factor_research_runs(limit=min(max(limit, 1), 50))
+
+
+@router.get("/factors/shadow")
+async def list_factor_shadow_rankings(
+    repo: Repo, _: CurrentUser, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Return read-only factor rankings recorded beside normal candidate ranking."""
+
+    return await repo.list_factor_shadow_rankings(limit=min(max(limit, 1), 50))

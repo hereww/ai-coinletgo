@@ -2,7 +2,12 @@ import { useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Database, FlaskConical, LoaderCircle } from 'lucide-react'
 import { api } from '../api/client'
-import type { FactorResearchRequest, FactorResearchResult, FactorResearchRun } from '../api/types'
+import type {
+  FactorPortfolioMetrics,
+  FactorResearchRequest,
+  FactorResearchResult,
+  FactorResearchRun,
+} from '../api/types'
 import { Button } from '../components/Button'
 import { PageHeader } from '../components/PageHeader'
 
@@ -33,6 +38,19 @@ function formatPercent(value: number | null) {
 function latestDecay(factor: FactorResearchResult['factors'][number]) {
   const point = factor.decay.at(-1)
   return point ? formatMetric(point.mean_ic) : '—'
+}
+
+function portfolioMetric(
+  portfolio: FactorPortfolioMetrics | null | undefined,
+  key: keyof FactorPortfolioMetrics,
+) {
+  if (!portfolio) return null
+  const value = portfolio[key]
+  return typeof value === 'number' ? value : null
+}
+
+function preferredPortfolio(factor: FactorResearchResult['factors'][number]) {
+  return factor.walk_forward_portfolio ?? factor.portfolio
 }
 
 function completedReport(run: FactorResearchRun | undefined): FactorResearchResult | null {
@@ -74,6 +92,11 @@ export default function FactorResearchPage() {
       (run) => run.status === 'QUEUED' || run.status === 'RUNNING',
     ) ? 2_500 : false,
   })
+  const shadow = useQuery({
+    queryKey: ['factor-shadow-rankings'],
+    queryFn: api.factorShadowRankings,
+    refetchInterval: 10_000,
+  })
   const research = useMutation({
     mutationFn: api.researchFactors,
     onSuccess: (submission) => {
@@ -97,6 +120,12 @@ export default function FactorResearchPage() {
       rebalance_bars: rebalanceBars,
       winsorize_quantile: '0.05',
       min_cross_section: 3,
+      maker_fee_rate: '0.0002',
+      taker_fee_rate: '0.0005',
+      slippage_rate: '0.0005',
+      funding_rate_fallback: '0.0001',
+      walk_forward_folds: 4,
+      portfolio_quantile: '0.2',
     }
     research.mutate(payload)
   }
@@ -225,7 +254,7 @@ export default function FactorResearchPage() {
             <thead><tr>
               <th>因子</th><th>分类</th><th>状态</th><th>Mean IC</th><th>ICIR</th>
               <th>IC 正值率</th><th>样本内 IC</th><th>样本外 IC</th><th>q 值</th>
-              <th>换手率</th><th>目标期 IC</th><th>时间点</th>
+              <th>换手率</th><th>目标期 IC</th><th>WF净收益</th><th>WF最大回撤</th><th>WF Sharpe</th><th>时间点</th>
             </tr></thead>
             <tbody>{result.factors.map((factor) => <tr key={factor.key}>
               <td className="factor-name-cell"><strong>{factor.label}</strong><small>{factor.unavailable_reason ?? factor.description}</small></td>
@@ -239,6 +268,9 @@ export default function FactorResearchPage() {
               <td className="mono">{formatMetric(factor.q_value)}</td>
               <td className="mono">{formatPercent(factor.turnover)}</td>
               <td className="mono">{latestDecay(factor)}</td>
+              <td className={portfolioMetric(preferredPortfolio(factor), 'net_return') !== null && (portfolioMetric(preferredPortfolio(factor), 'net_return') ?? 0) < 0 ? 'negative mono' : 'mono'}>{formatPercent(portfolioMetric(preferredPortfolio(factor), 'net_return'))}</td>
+              <td className="mono">{formatPercent(portfolioMetric(preferredPortfolio(factor), 'max_drawdown'))}</td>
+              <td className="mono">{formatMetric(portfolioMetric(preferredPortfolio(factor), 'sharpe'))}</td>
               <td className="mono">{factor.timestamp_count}</td>
             </tr>)}</tbody>
           </table>
@@ -246,11 +278,35 @@ export default function FactorResearchPage() {
         <div className="factor-methodology">
           <span>Spearman Rank IC</span>
           <span>横截面 5% Winsorize + z-score</span>
-          <span>时间顺序 50/50 样本外验证</span>
+          <span>滚动 Walk-forward 样本外验证</span>
+          <span>taker 费率 + 滑点 + 已知资金费率</span>
           <span>BH-FDR q≤0.05</span>
           <strong>{result.methodology.pass_rule}</strong>
         </div>
       </section>
+      {shadow.data?.[0] ? <section className="surface factor-shadow-results">
+        <div className="section-head">
+          <h2>影子因子排名</h2>
+          <span>仅记录，不改变候选合约、风控或订单</span>
+        </div>
+        <div className="factor-shadow-meta">
+          <span>研究任务 {shadow.data[0].research_run_id.slice(0, 8)}</span>
+          <span>{shadow.data[0].payload.selected_factors.length} 个通过因子</span>
+          <span>{shadow.data[0].timestamp}</span>
+        </div>
+        <div className="table-scroll">
+          <table className="data-table factor-shadow-table">
+            <thead><tr><th>排名</th><th>合约</th><th>综合分数</th><th>因子覆盖</th><th>因子贡献</th></tr></thead>
+            <tbody>{shadow.data[0].payload.rankings.map((row, index) => <tr key={row.symbol}>
+              <td className="mono">{index + 1}</td>
+              <td><strong>{row.symbol}</strong></td>
+              <td className={row.score < 0 ? 'negative mono' : 'mono'}>{formatMetric(row.score)}</td>
+              <td className="mono">{formatPercent(row.factor_coverage)}</td>
+              <td className="factor-contributions">{Object.entries(row.contributions).map(([key, value]) => `${key} ${value >= 0 ? '+' : ''}${value.toFixed(2)}`).join(' · ')}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </section> : null}
     </> : <section className="surface factor-empty">
       <FlaskConical size={22} />
       <strong>尚未运行研究</strong>

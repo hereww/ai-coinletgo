@@ -320,6 +320,16 @@ class FactorResearchRequest(BaseModel):
     rebalance_bars: int = Field(default=24, ge=1, le=96)
     winsorize_quantile: Decimal = Field(default=Decimal("0.05"), ge=0, le=Decimal("0.2"))
     min_cross_section: int = Field(default=3, ge=3, le=20)
+    maker_fee_rate: Decimal = Field(default=Decimal("0.0002"), ge=0, le=Decimal("0.02"))
+    taker_fee_rate: Decimal = Field(default=Decimal("0.0005"), ge=0, le=Decimal("0.02"))
+    slippage_rate: Decimal = Field(default=Decimal("0.0005"), ge=0, le=Decimal("0.02"))
+    funding_rate_fallback: Decimal = Field(
+        default=Decimal("0.0001"), ge=Decimal("-0.1"), le=Decimal("0.1")
+    )
+    walk_forward_folds: int = Field(default=4, ge=2, le=12)
+    portfolio_quantile: Decimal = Field(
+        default=Decimal("0.2"), gt=0, le=Decimal("0.5")
+    )
 
     @field_validator("symbols", mode="before")
     @classmethod

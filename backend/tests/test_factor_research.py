@@ -5,10 +5,12 @@ from decimal import Decimal
 
 import pytest
 
+from tests.factories import snapshot
 from trading_system.domain.models import Candle
 from trading_system.strategy.factor_research import (
     align_funding_point_in_time,
     benjamini_hochberg,
+    build_factor_shadow_ranking,
     cross_sectional_zscores,
     run_factor_research,
     spearman_rank_ic,
@@ -144,4 +146,48 @@ def test_research_passes_predictive_factor_and_marks_missing_histories_unavailab
     assert factors["price_oi_state"]["mean_ic"] is None
     assert factors["basis_zscore"]["status"] == "UNAVAILABLE"
     assert factors["book_imbalance"]["status"] == "UNAVAILABLE"
-    assert report["methodology"]["validation"] == "chronological_half_holdout"
+    assert report["methodology"]["validation"] == "rolling_walk_forward_expanding_train_test"
+    assert "gross_return" in factors["momentum_5d"]["portfolio"]
+    assert "net_return" in factors["momentum_5d"]["portfolio"]
+    assert "portfolio_maker" in factors["momentum_5d"]
+
+
+def test_shadow_ranking_uses_only_passed_factors_and_respects_direction() -> None:
+    timestamp = datetime(2026, 9, 5, tzinfo=UTC)
+    snapshots = [
+        snapshot(symbol="AAAUSDT", timestamp=timestamp, factor_values={"reversal": Decimal("1")}),
+        snapshot(symbol="BBBUSDT", timestamp=timestamp, factor_values={"reversal": Decimal("2")}),
+        snapshot(symbol="CCCUSDT", timestamp=timestamp, factor_values={"reversal": Decimal("3")}),
+    ]
+    research_run = {
+        "id": "run-1",
+        "report": {
+            "parameters": {"winsorize_quantile": "0.05"},
+            "factors": [
+                {"key": "reversal", "label": "反转", "direction": "NEGATIVE", "status": "PASSED"},
+                {"key": "watch", "label": "观察因子", "direction": "POSITIVE", "status": "WATCH"},
+                {
+                    "key": "missing",
+                    "label": "缺失因子",
+                    "direction": "POSITIVE",
+                    "status": "UNAVAILABLE",
+                },
+            ],
+        },
+    }
+
+    shadow = build_factor_shadow_ranking(snapshots, research_run)
+
+    assert shadow is not None
+    assert shadow["research_run_id"] == "run-1"
+    assert shadow["execution_effect"] == "shadow_only; does_not_change_candidates_or_orders"
+    assert shadow["selected_factors"] == [
+        {"key": "reversal", "label": "反转", "direction": "NEGATIVE"}
+    ]
+    assert shadow["rankings"][0]["symbol"] == "AAAUSDT"
+    assert shadow["rankings"][0]["factor_coverage"] == pytest.approx(1)
+
+    assert build_factor_shadow_ranking(
+        snapshots,
+        {"id": "run-2", "report": {"factors": [{"key": "watch", "status": "WATCH"}]}},
+    ) is None

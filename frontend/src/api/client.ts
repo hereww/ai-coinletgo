@@ -6,6 +6,7 @@ import type {
   FactorResearchRequest,
   FactorResearchRun,
   FactorResearchSubmission,
+  FactorShadowRanking,
   IncomeLedgerRow,
   IntegrationStatus,
   ManualEntryAdvice,
@@ -337,4 +338,5 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   factorResearchRuns: () => request<FactorResearchRun[]>('/api/v1/factors/research'),
+  factorShadowRankings: () => request<FactorShadowRanking[]>('/api/v1/factors/shadow'),
 }

@@ -27,6 +27,7 @@ from trading_system.persistence.records import (
     EquityCheckpointRecord,
     EquityHistoryRecord,
     FactorResearchRunRecord,
+    FactorShadowRankingRecord,
     IncomeLedgerRecord,
     MarketFeatureRecord,
     ModelReplayCacheRecord,
@@ -1453,6 +1454,62 @@ class Repository:
                     "report": record.report,
                     "created_at": record.created_at,
                     "completed_at": record.completed_at,
+                }
+                for record in result.scalars()
+            ]
+
+    async def latest_completed_factor_research(self) -> dict[str, Any] | None:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorResearchRunRecord)
+                .where(FactorResearchRunRecord.status == "COMPLETED")
+                .order_by(desc(FactorResearchRunRecord.completed_at))
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return {
+                "id": record.id,
+                "status": record.status,
+                "parameters": record.parameters,
+                "report": record.report,
+                "created_at": record.created_at,
+                "completed_at": record.completed_at,
+            }
+
+    async def save_factor_shadow_ranking(self, payload: dict[str, object]) -> str:
+        generated_at = payload.get("generated_at")
+        if not isinstance(generated_at, str):
+            raise ValueError("factor shadow ranking requires generated_at")
+        research_run_id = payload.get("research_run_id")
+        if not isinstance(research_run_id, str) or not research_run_id:
+            raise ValueError("factor shadow ranking requires research_run_id")
+        timestamp = datetime.fromisoformat(generated_at)
+        async with self.database.sessions() as session:
+            record = FactorShadowRankingRecord(
+                research_run_id=research_run_id,
+                timestamp=timestamp,
+                payload=payload,
+            )
+            session.add(record)
+            await session.commit()
+            return record.id
+
+    async def list_factor_shadow_rankings(self, limit: int = 20) -> list[dict[str, Any]]:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorShadowRankingRecord)
+                .order_by(desc(FactorShadowRankingRecord.timestamp))
+                .limit(limit)
+            )
+            return [
+                {
+                    "id": record.id,
+                    "research_run_id": record.research_run_id,
+                    "timestamp": record.timestamp,
+                    "payload": record.payload,
+                    "created_at": record.created_at,
                 }
                 for record in result.scalars()
             ]
