@@ -26,6 +26,8 @@ from trading_system.persistence.records import (
     AuditEventRecord,
     EquityCheckpointRecord,
     EquityHistoryRecord,
+    FactorPolicyRecord,
+    FactorPolicyWindowRecord,
     FactorResearchRunRecord,
     FactorShadowRankingRecord,
     IncomeLedgerRecord,
@@ -792,6 +794,25 @@ class Repository:
                 allocation.updated_at = datetime.now(UTC)
             await session.commit()
 
+    async def latest_successful_portfolio_risk_increase_at(self) -> datetime | None:
+        """Return the persisted OPEN/ADD execution time used by the hard cooldown."""
+
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(PortfolioExecutionRecord)
+                .where(
+                    PortfolioExecutionRecord.status == "EXECUTED",
+                    PortfolioExecutionRecord.action.in_(["OPEN", "ADD"]),
+                )
+                .order_by(desc(PortfolioExecutionRecord.updated_at))
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            value = record.updated_at or record.created_at
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
     async def list_portfolio_decisions(self, limit: int = 100) -> list[dict[str, Any]]:
         async with self.database.sessions() as session:
             result = await session.execute(
@@ -1458,15 +1479,9 @@ class Repository:
                 for record in result.scalars()
             ]
 
-    async def latest_completed_factor_research(self) -> dict[str, Any] | None:
+    async def get_factor_research_run(self, run_id: str) -> dict[str, Any] | None:
         async with self.database.sessions() as session:
-            result = await session.execute(
-                select(FactorResearchRunRecord)
-                .where(FactorResearchRunRecord.status == "COMPLETED")
-                .order_by(desc(FactorResearchRunRecord.completed_at))
-                .limit(1)
-            )
-            record = result.scalar_one_or_none()
+            record = await session.get(FactorResearchRunRecord, run_id)
             if record is None:
                 return None
             return {
@@ -1477,6 +1492,253 @@ class Repository:
                 "created_at": record.created_at,
                 "completed_at": record.completed_at,
             }
+
+    async def latest_completed_factor_research(self) -> dict[str, Any] | None:
+        """Return the newest completed research containing at least one PASSED factor."""
+
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorResearchRunRecord)
+                .where(FactorResearchRunRecord.status == "COMPLETED")
+                .order_by(desc(FactorResearchRunRecord.completed_at))
+                .limit(100)
+            )
+            for record in result.scalars():
+                raw_factors = record.report.get("factors")
+                if not isinstance(raw_factors, list) or not any(
+                    isinstance(item, dict) and item.get("status") == "PASSED"
+                    for item in raw_factors
+                ):
+                    continue
+                return {
+                    "id": record.id,
+                    "status": record.status,
+                    "parameters": record.parameters,
+                    "report": record.report,
+                    "created_at": record.created_at,
+                    "completed_at": record.completed_at,
+                }
+            return None
+
+    async def sync_factor_policy_candidate(
+        self, frozen_snapshot: dict[str, object]
+    ) -> dict[str, Any] | None:
+        research_run_id = str(frozen_snapshot.get("research_run_id", ""))
+        if not research_run_id:
+            raise ValueError("factor policy snapshot requires research_run_id")
+        now = datetime.now(UTC)
+        async with self.database.sessions() as session:
+            active = (
+                await session.execute(
+                    select(FactorPolicyRecord)
+                    .where(FactorPolicyRecord.status == "ACTIVE")
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if active is not None and active.research_run_id == research_run_id:
+                return self._factor_policy_row(active)
+            existing = (
+                await session.execute(
+                    select(FactorPolicyRecord)
+                    .where(FactorPolicyRecord.research_run_id == research_run_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            shadows = list(
+                (
+                    await session.execute(
+                        select(FactorPolicyRecord).where(FactorPolicyRecord.status == "SHADOW")
+                    )
+                ).scalars()
+            )
+            for shadow in shadows:
+                if shadow.research_run_id != research_run_id:
+                    shadow.status = "REPLACED"
+                    shadow.updated_at = now
+            if existing is None:
+                existing = FactorPolicyRecord(
+                    research_run_id=research_run_id,
+                    status="SHADOW",
+                    frozen_snapshot=frozen_snapshot,
+                    updated_at=now,
+                )
+                session.add(existing)
+            elif existing.status != "ACTIVE":
+                existing.status = "SHADOW"
+                existing.frozen_snapshot = frozen_snapshot
+                existing.updated_at = now
+            await session.commit()
+            await session.refresh(existing)
+            return self._factor_policy_row(existing)
+
+    async def get_factor_policy(self, status: str) -> dict[str, Any] | None:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorPolicyRecord)
+                .where(FactorPolicyRecord.status == status)
+                .order_by(desc(FactorPolicyRecord.updated_at))
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+            return self._factor_policy_row(record) if record is not None else None
+
+    async def create_factor_policy_window(
+        self,
+        *,
+        research_run_id: str,
+        window_start: datetime,
+        window_end: datetime,
+        payload: dict[str, object],
+    ) -> bool:
+        async with self.database.sessions() as session:
+            existing = (
+                await session.execute(
+                    select(FactorPolicyWindowRecord.id).where(
+                        FactorPolicyWindowRecord.research_run_id == research_run_id,
+                        FactorPolicyWindowRecord.window_start == window_start,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return False
+            session.add(
+                FactorPolicyWindowRecord(
+                    research_run_id=research_run_id,
+                    status="PENDING",
+                    window_start=window_start,
+                    window_end=window_end,
+                    payload=payload,
+                    result={},
+                )
+            )
+            await session.commit()
+            return True
+
+    async def due_factor_policy_windows(
+        self, research_run_id: str, now: datetime
+    ) -> list[dict[str, Any]]:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorPolicyWindowRecord)
+                .where(
+                    FactorPolicyWindowRecord.research_run_id == research_run_id,
+                    FactorPolicyWindowRecord.status == "PENDING",
+                    FactorPolicyWindowRecord.window_end <= now,
+                )
+                .order_by(FactorPolicyWindowRecord.window_start)
+            )
+            return [self._factor_window_row(record) for record in result.scalars()]
+
+    async def mature_factor_policy_window(
+        self, window_id: str, result: dict[str, object]
+    ) -> None:
+        async with self.database.sessions() as session:
+            record = await session.get(FactorPolicyWindowRecord, window_id)
+            if record is None or record.status != "PENDING":
+                return
+            record.status = "MATURED"
+            record.result = result
+            record.matured_at = datetime.now(UTC)
+            await session.commit()
+
+    async def invalidate_factor_policy_window(
+        self, window_id: str, result: dict[str, object]
+    ) -> None:
+        async with self.database.sessions() as session:
+            record = await session.get(FactorPolicyWindowRecord, window_id)
+            if record is None or record.status != "PENDING":
+                return
+            record.status = "INVALID"
+            record.result = result
+            record.matured_at = datetime.now(UTC)
+            await session.commit()
+
+    async def list_factor_policy_windows(
+        self, research_run_id: str, limit: int = 365
+    ) -> list[dict[str, Any]]:
+        async with self.database.sessions() as session:
+            result = await session.execute(
+                select(FactorPolicyWindowRecord)
+                .where(FactorPolicyWindowRecord.research_run_id == research_run_id)
+                .order_by(FactorPolicyWindowRecord.window_start)
+                .limit(limit)
+            )
+            return [self._factor_window_row(record) for record in result.scalars()]
+
+    async def promote_factor_policy(self, research_run_id: str) -> bool:
+        now = datetime.now(UTC)
+        async with self.database.sessions() as session:
+            candidate = (
+                await session.execute(
+                    select(FactorPolicyRecord)
+                    .where(
+                        FactorPolicyRecord.research_run_id == research_run_id,
+                        FactorPolicyRecord.status == "SHADOW",
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if candidate is None:
+                return False
+            active = list(
+                (
+                    await session.execute(
+                        select(FactorPolicyRecord).where(FactorPolicyRecord.status == "ACTIVE")
+                    )
+                ).scalars()
+            )
+            for record in active:
+                record.status = "RETIRED"
+                record.updated_at = now
+            candidate.status = "ACTIVE"
+            candidate.activated_at = now
+            candidate.updated_at = now
+            await session.commit()
+            return True
+
+    async def factor_policy_status(self, required_windows: int) -> dict[str, object]:
+        from trading_system.strategy.factor_policy import promotion_metrics
+
+        active = await self.get_factor_policy("ACTIVE")
+        shadow = await self.get_factor_policy("SHADOW")
+        windows = (
+            await self.list_factor_policy_windows(str(shadow["research_run_id"]))
+            if shadow is not None
+            else []
+        )
+        metrics = promotion_metrics(windows, required_windows)
+        return {
+            "active": active,
+            "shadow": shadow,
+            "promotion": metrics,
+            "windows": windows,
+        }
+
+    @staticmethod
+    def _factor_policy_row(record: FactorPolicyRecord) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "research_run_id": record.research_run_id,
+            "status": record.status,
+            "frozen_snapshot": record.frozen_snapshot,
+            "activated_at": record.activated_at,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+
+    @staticmethod
+    def _factor_window_row(record: FactorPolicyWindowRecord) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "research_run_id": record.research_run_id,
+            "status": record.status,
+            "window_start": record.window_start,
+            "window_end": record.window_end,
+            "payload": record.payload,
+            "result": record.result,
+            "created_at": record.created_at,
+            "matured_at": record.matured_at,
+        }
 
     async def save_factor_shadow_ranking(self, payload: dict[str, object]) -> str:
         generated_at = payload.get("generated_at")

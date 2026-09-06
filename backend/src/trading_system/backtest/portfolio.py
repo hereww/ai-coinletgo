@@ -18,6 +18,7 @@ from trading_system.domain.models import (
     AccountState,
     Candle,
     ExchangeFilters,
+    FactorOverlay,
     MarketSnapshot,
     PositionState,
     RiskContext,
@@ -27,7 +28,17 @@ from trading_system.domain.models import (
     UniverseSymbol,
 )
 from trading_system.risk.engine import RiskEngine
-from trading_system.strategy.indicators import atr, pearson_correlation
+from trading_system.strategy.exit_policy import first_take_profit
+from trading_system.strategy.factor_policy import (
+    build_factor_overlays,
+    rebalance_window,
+)
+from trading_system.strategy.factor_research import (
+    align_funding_point_in_time,
+    spearman_rank_ic,
+)
+from trading_system.strategy.factors import compute_factor_values, normalize_factor_values
+from trading_system.strategy.indicators import atr, strict_pearson_correlation
 from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import build_snapshot
 
@@ -44,7 +55,15 @@ class SymbolLedger:
     holding_bars: list[int] = field(default_factory=list)
     fees: Decimal = Decimal("0")
     funding: Decimal = Decimal("0")
+    slippage: Decimal = Decimal("0")
     rejections: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+
+
+@dataclass
+class FactorReplayObservation:
+    window_end: datetime
+    factor_scores: dict[str, float]
+    start_prices: dict[str, Decimal]
 
 
 class PortfolioBacktestEngine(BacktestEngine):
@@ -64,11 +83,28 @@ class PortfolioBacktestEngine(BacktestEngine):
         *,
         evaluation_start: datetime | None = None,
         funding_rates: dict[str, dict[datetime, Decimal]] | None = None,
+        factor_policy: dict[str, object] | None = None,
+        factor_enabled: bool = False,
+        factor_rank_weight: Decimal = Decimal("0.20"),
+        factor_minimum_risk_multiplier: Decimal = Decimal("0.75"),
     ) -> BacktestResult:
         config = config or BacktestConfig()
         self._active_config = config
         self._validate_inputs(markets, filters)
         funding_rates = funding_rates or {}
+        self._factor_policy = factor_policy
+        self._factor_enabled = factor_enabled and factor_policy is not None
+        self._factor_rank_weight = factor_rank_weight
+        self._factor_minimum_risk_multiplier = factor_minimum_risk_multiplier
+        self._factor_last_bucket: datetime | None = None
+        self._factor_overlay_bucket: datetime | None = None
+        self._factor_cached_overlays: dict[str, FactorOverlay] = {}
+        self._factor_previous_candidates: set[str] | None = None
+        self._factor_turnovers: list[Decimal] = []
+        self._factor_observations: list[FactorReplayObservation] = []
+        self._factor_ics: list[Decimal] = []
+        self._factor_risk_clippings = 0
+        self._factor_fallbacks = 0
         candle_maps = {
             symbol: {candle.open_time: candle for candle in candles}
             for symbol, candles in markets.items()
@@ -157,6 +193,7 @@ class PortfolioBacktestEngine(BacktestEngine):
                     del positions[symbol]
 
             self._append_history(current, histories, last_prices)
+            self._mature_factor_observations(timestamp, last_prices)
             marked_equity = self._marked_equity(equity, positions, last_prices)
             last_marked_equity = marked_equity
             peak = max(peak, marked_equity)
@@ -236,6 +273,20 @@ class PortfolioBacktestEngine(BacktestEngine):
             circuit_breaker_triggered=circuit_breaker_triggered,
             equity_curve=curve,
             symbol_results=self._symbol_results(ledgers, filters, config.initial_equity),
+            candidate_turnover=(
+                sum(self._factor_turnovers, Decimal("0"))
+                / Decimal(len(self._factor_turnovers))
+                if self._factor_turnovers
+                else Decimal("0")
+            ),
+            oriented_mean_ic=(
+                sum(self._factor_ics, Decimal("0")) / Decimal(len(self._factor_ics))
+                if self._factor_ics
+                else None
+            ),
+            factor_risk_clippings=self._factor_risk_clippings,
+            factor_fallbacks=self._factor_fallbacks,
+            slippage=sum((ledger.slippage for ledger in ledgers.values()), Decimal("0")),
         )
 
     def _process_pending(
@@ -282,6 +333,12 @@ class PortfolioBacktestEngine(BacktestEngine):
                 config,
                 correlations,
             )
+            if (
+                item.snapshot.factor_overlay is not None
+                and item.snapshot.factor_overlay.policy_status == "ACTIVE"
+                and item.snapshot.factor_overlay.risk_multiplier < Decimal("1")
+            ):
+                self._factor_risk_clippings += 1
             decision = self.risk.evaluate(item.signal, item.snapshot, context)
             if decision.status != DecisionStatus.APPROVED:
                 for reason in decision.reasons:
@@ -319,9 +376,78 @@ class PortfolioBacktestEngine(BacktestEngine):
             if historical_rate != snapshot.funding_rate:
                 snapshot = snapshot.model_copy(update={"funding_rate": historical_rate})
             snapshots.append(snapshot)
-        snapshot_map = {snapshot.symbol: snapshot for snapshot in snapshots}
         self._rank_config = config
+        screener = self._screener(config)
+        snapshots = [
+            snapshot.model_copy(update={"score": screener.score(snapshot)})
+            for snapshot in snapshots
+        ]
+        overlay_applied = False
+        if self._factor_enabled and self._factor_policy is not None and snapshots:
+            bucket, _ = rebalance_window(snapshots[0].timestamp, self._factor_policy)
+            if bucket != self._factor_overlay_bucket:
+                self._factor_overlay_bucket = bucket
+                self._factor_cached_overlays = {}
+                try:
+                    with_values = [
+                        snapshot.model_copy(
+                            update={
+                                "factor_values": self._point_in_time_factor_values(
+                                    histories[snapshot.symbol],
+                                    funding_rates.get(snapshot.symbol, {}),
+                                    self._factor_policy,
+                                )
+                            }
+                        )
+                        for snapshot in snapshots
+                    ]
+                    overlays, _ = build_factor_overlays(
+                        with_values,
+                        self._factor_policy,
+                        status="ACTIVE",
+                        rank_weight=self._factor_rank_weight,
+                        minimum_risk_multiplier=self._factor_minimum_risk_multiplier,
+                    )
+                    self._factor_cached_overlays = overlays
+                    snapshots = [
+                        snapshot.model_copy(
+                            update={
+                                "factor_values": with_values[index].factor_values,
+                                "factor_overlay": overlays[snapshot.symbol],
+                            }
+                        )
+                        for index, snapshot in enumerate(snapshots)
+                    ]
+                    overlay_applied = True
+                except (ArithmeticError, KeyError, TypeError, ValueError):
+                    self._factor_fallbacks += 1
+            elif self._factor_cached_overlays:
+                if all(
+                    snapshot.symbol in self._factor_cached_overlays
+                    for snapshot in snapshots
+                ):
+                    snapshots = [
+                        snapshot.model_copy(
+                            update={
+                                "factor_overlay": self._factor_cached_overlays[
+                                    snapshot.symbol
+                                ]
+                            }
+                        )
+                        for snapshot in snapshots
+                    ]
+                    overlay_applied = True
+                else:
+                    self._factor_cached_overlays = {}
+                    self._factor_fallbacks += 1
+        snapshot_map = {snapshot.symbol: snapshot for snapshot in snapshots}
         candidates = self._rank_candidates(snapshots, ledgers, config.candidate_count)
+        self._record_factor_bucket(
+            snapshots,
+            candidates,
+            self._factor_policy,
+            overlay_applied=overlay_applied,
+        )
         for snapshot in candidates:
             symbol = snapshot.symbol
             if symbol in positions or symbol in pending:
@@ -355,23 +481,7 @@ class PortfolioBacktestEngine(BacktestEngine):
                 if isinstance(candidate_config, BacktestConfig)
                 else BacktestConfig()
             )
-        screener = MarketScreener(
-            max_spread_pct=resolved_config.max_spread_pct,
-            max_abs_funding_rate=resolved_config.max_abs_funding_rate,
-            max_abs_basis_pct=resolved_config.max_abs_basis_pct,
-            min_book_depth_usdt=resolved_config.min_book_depth_usdt,
-            min_listing_days=resolved_config.min_listing_days,
-            max_volatility_percentile=resolved_config.max_volatility_percentile,
-            entry_trigger=cast(
-                Literal["breakout_or_pullback", "breakout_only", "pullback_only"],
-                resolved_config.entry_trigger,
-            ),
-            trend_adx_min=resolved_config.trend_adx_min,
-            strong_trend_entry_override_enabled=resolved_config.strong_trend_entry_override_enabled,
-            strong_trend_adx_min=resolved_config.strong_trend_adx_min,
-            volatility_soft_limit_percentile=resolved_config.volatility_soft_limit_percentile,
-            volatility_hard_limit_percentile=resolved_config.volatility_hard_limit_percentile,
-        )
+        screener = self._screener(resolved_config)
         for snapshot in snapshots:
             accepted, reasons = screener.eligible(snapshot)
             if not accepted:
@@ -380,7 +490,112 @@ class PortfolioBacktestEngine(BacktestEngine):
                 continue
             snapshot.score = screener.score(snapshot)
             eligible.append(snapshot)
-        return sorted(eligible, key=lambda item: item.score, reverse=True)[:limit]
+        return sorted(eligible, key=MarketScreener._ranking_key)[:limit]
+
+    @staticmethod
+    def _screener(config: BacktestConfig) -> MarketScreener:
+        return MarketScreener(
+            max_spread_pct=config.max_spread_pct,
+            max_abs_funding_rate=config.max_abs_funding_rate,
+            max_abs_basis_pct=config.max_abs_basis_pct,
+            min_book_depth_usdt=config.min_book_depth_usdt,
+            min_listing_days=config.min_listing_days,
+            max_volatility_percentile=config.max_volatility_percentile,
+            entry_trigger=cast(
+                Literal["breakout_or_pullback", "breakout_only", "pullback_only"],
+                config.entry_trigger,
+            ),
+            trend_adx_min=config.trend_adx_min,
+            strong_trend_entry_override_enabled=config.strong_trend_entry_override_enabled,
+            strong_trend_adx_min=config.strong_trend_adx_min,
+            volatility_soft_limit_percentile=config.volatility_soft_limit_percentile,
+            volatility_hard_limit_percentile=config.volatility_hard_limit_percentile,
+        )
+
+    @staticmethod
+    def _point_in_time_factor_values(
+        history: list[Candle],
+        funding_rates: dict[datetime, Decimal],
+        factor_policy: dict[str, object],
+    ) -> dict[str, Decimal]:
+        parameters = factor_policy.get("parameters")
+        if not isinstance(parameters, dict):
+            raise ValueError("factor replay parameters are missing")
+        interval = str(parameters.get("interval", "1h"))
+        aggregation = {"1h": 4, "4h": 16}.get(interval)
+        bars_per_day = {"1h": 24, "4h": 6}.get(interval)
+        if aggregation is None or bars_per_day is None:
+            raise ValueError("unsupported factor replay interval")
+        factor_candles = aggregate_candles(history, aggregation)
+        factor_bars = align_funding_point_in_time(factor_candles, funding_rates)
+        normalized = normalize_factor_values(
+            compute_factor_values(
+                factor_bars,
+                bars_per_day=bars_per_day,
+                bars_per_year=bars_per_day * 365,
+            )
+        )
+        return {key: value for key, value in normalized.items() if value is not None}
+
+    def _record_factor_bucket(
+        self,
+        snapshots: list[MarketSnapshot],
+        candidates: list[MarketSnapshot],
+        factor_policy: dict[str, object] | None,
+        *,
+        overlay_applied: bool,
+    ) -> None:
+        if factor_policy is None or not snapshots:
+            return
+        window_start, window_end = rebalance_window(
+            snapshots[0].timestamp, factor_policy
+        )
+        if self._factor_last_bucket == window_start:
+            return
+        self._factor_last_bucket = window_start
+        selected = {item.symbol for item in candidates}
+        previous = self._factor_previous_candidates
+        if previous is not None:
+            denominator = max(1, len(previous), len(selected))
+            turnover = Decimal(len(previous.symmetric_difference(selected))) / Decimal(
+                denominator * 2
+            )
+            self._factor_turnovers.append(turnover)
+        self._factor_previous_candidates = selected
+        if not overlay_applied:
+            return
+        scores = {
+            item.symbol: float(item.factor_overlay.factor_score)
+            for item in snapshots
+            if item.factor_overlay is not None
+        }
+        prices = {item.symbol: item.mark_price for item in snapshots if item.symbol in scores}
+        if len(scores) >= 2:
+            self._factor_observations.append(
+                FactorReplayObservation(
+                    window_end=window_end,
+                    factor_scores=scores,
+                    start_prices=prices,
+                )
+            )
+
+    def _mature_factor_observations(
+        self, timestamp: datetime, prices: dict[str, Decimal]
+    ) -> None:
+        remaining: list[FactorReplayObservation] = []
+        for observation in self._factor_observations:
+            if timestamp < observation.window_end:
+                remaining.append(observation)
+                continue
+            returns = {
+                symbol: prices[symbol] / start - Decimal("1")
+                for symbol, start in observation.start_prices.items()
+                if symbol in prices and start > 0
+            }
+            ic = spearman_rank_ic(observation.factor_scores, returns)
+            if ic is not None:
+                self._factor_ics.append(Decimal(str(ic)))
+        self._factor_observations = remaining
 
     @staticmethod
     def _portfolio_snapshot(
@@ -441,10 +656,20 @@ class PortfolioBacktestEngine(BacktestEngine):
         config: BacktestConfig,
     ) -> TradeSignal | None:
         entry = snapshot.mid_price
-        risk_distance = snapshot.atr_15m * config.stop_atr
+        stop_atr = (
+            config.manual_stop_atr
+            if config.manual_exit_levels_enabled
+            else config.stop_atr
+        )
+        risk_distance = snapshot.atr_15m * stop_atr
         direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
         invalidation = entry - direction * risk_distance
-        target = entry + direction * risk_distance * Decimal("3")
+        target_distance = (
+            snapshot.atr_15m * config.manual_take_profit_atr
+            if config.manual_exit_levels_enabled
+            else risk_distance * Decimal("3")
+        )
+        target = entry + direction * target_distance
         if invalidation <= 0 or target <= 0:
             return None
         return TradeSignal(
@@ -477,20 +702,30 @@ class PortfolioBacktestEngine(BacktestEngine):
             if signal.action == SignalAction.OPEN_LONG
             else PositionSide.SHORT
         )
-        direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
-        risk_distance = abs(decision.entry_price - decision.stop_price)
-        entry_fee = decision.quantity * decision.entry_price * config.fee_rate
+        raw_entry = decision.entry_price
+        entry = raw_entry * (
+            Decimal("1") + config.slippage_rate
+            if side == PositionSide.LONG
+            else Decimal("1") - config.slippage_rate
+        )
+        entry_fee = decision.quantity * entry * config.fee_rate
         return SimPosition(
             side=side,
             quantity=decision.quantity,
             remaining=decision.quantity,
-            entry=decision.entry_price,
+            entry=entry,
             stop=decision.stop_price,
-            tp1=decision.entry_price + direction * risk_distance,
-            tp2=decision.entry_price + direction * risk_distance * Decimal("2"),
-            highest=decision.entry_price,
-            lowest=decision.entry_price,
+            tp1=first_take_profit(
+                entry=entry,
+                stop_price=decision.stop_price,
+                final_target=decision.target_price,
+                side=side,
+            ),
+            tp2=decision.target_price,
+            highest=entry,
+            lowest=entry,
             fees=entry_fee,
+            slippage=abs(entry - raw_entry) * decision.quantity,
             symbol=symbol,
             initial_risk=decision.risk_amount_usdt,
             margin_used=decision.estimated_margin,
@@ -609,11 +844,13 @@ class PortfolioBacktestEngine(BacktestEngine):
         correlations: dict[str, Decimal] = {}
         for symbol in positions:
             peer = snapshots.get(symbol)
-            correlations[symbol] = (
-                pearson_correlation(candidate.recent_returns_1h, peer.recent_returns_1h)
-                if peer is not None
-                else Decimal("1")
+            if peer is None:
+                continue
+            correlation = strict_pearson_correlation(
+                candidate.recent_returns_1h, peer.recent_returns_1h
             )
+            if correlation is not None:
+                correlations[symbol] = correlation
         return correlations
 
     @staticmethod
@@ -661,6 +898,7 @@ class PortfolioBacktestEngine(BacktestEngine):
     def _record_closed_position(position: SimPosition, ledger: SymbolLedger) -> None:
         ledger.trade_pnls.append(position.realized - position.fees - position.funding)
         ledger.holding_bars.append(position.holding_bars)
+        ledger.slippage += position.slippage
 
     @staticmethod
     def _validate_inputs(

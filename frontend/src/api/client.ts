@@ -6,6 +6,7 @@ import type {
   FactorResearchRequest,
   FactorResearchRun,
   FactorResearchSubmission,
+  FactorPolicyStatus,
   FactorShadowRanking,
   IncomeLedgerRow,
   IntegrationStatus,
@@ -285,6 +286,7 @@ export const api = {
     start_date?: string
     end_date?: string
     portfolio_decision_id?: string
+    factor_research_run_id?: string
     backtest_config?: Partial<{
       initial_equity: string
       risk_pct: string
@@ -339,4 +341,5 @@ export const api = {
     }),
   factorResearchRuns: () => request<FactorResearchRun[]>('/api/v1/factors/research'),
   factorShadowRankings: () => request<FactorShadowRanking[]>('/api/v1/factors/shadow'),
+  factorPolicyStatus: () => request<FactorPolicyStatus>('/api/v1/factors/policy'),
 }

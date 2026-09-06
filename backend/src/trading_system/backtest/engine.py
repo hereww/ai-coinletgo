@@ -6,6 +6,13 @@ from decimal import Decimal
 
 from trading_system.domain.enums import PositionSide
 from trading_system.domain.models import Candle, UniverseSymbol
+from trading_system.strategy.exit_policy import (
+    TP1_FRACTION,
+    TP2_FRACTION,
+    breakeven_stop,
+    first_take_profit,
+    trailing_stop,
+)
 from trading_system.strategy.indicators import (
     atr,
     donchian_breakout,
@@ -35,6 +42,7 @@ class SimPosition:
     initial_risk: Decimal = Decimal("0")
     margin_used: Decimal = Decimal("0")
     funding: Decimal = Decimal("0")
+    slippage: Decimal = Decimal("0")
     holding_bars: int = 0
     opened_at: datetime | None = None
 
@@ -98,6 +106,11 @@ class BacktestResult:
     circuit_breaker_triggered: bool
     equity_curve: list[dict[str, str]]
     symbol_results: dict[str, dict[str, object]] = field(default_factory=dict)
+    candidate_turnover: Decimal = Decimal("0")
+    oriented_mean_ic: Decimal | None = None
+    factor_risk_clippings: int = 0
+    factor_fallbacks: int = 0
+    slippage: Decimal = Decimal("0")
 
     def to_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -112,10 +125,17 @@ class BacktestResult:
             "trades": self.trades,
             "fees": str(self.fees),
             "funding": str(self.funding),
+            "slippage": str(self.slippage),
             "average_holding_bars": str(self.average_holding_bars),
             "signal_rejections": self.signal_rejections,
             "circuit_breaker_triggered": self.circuit_breaker_triggered,
             "equity_curve": self.equity_curve,
+            "candidate_turnover": str(self.candidate_turnover),
+            "oriented_mean_ic": (
+                str(self.oriented_mean_ic) if self.oriented_mean_ic is not None else None
+            ),
+            "factor_risk_clippings": self.factor_risk_clippings,
+            "factor_fallbacks": self.factor_fallbacks,
         }
         if self.symbol_results:
             result["symbols"] = self.symbol_results
@@ -138,6 +158,7 @@ class BacktestEngine:
         current_holding = 0
         total_fees = Decimal("0")
         total_funding = Decimal("0")
+        total_slippage = Decimal("0")
         curve: list[dict[str, str]] = []
         signal_rejections = {"no_aligned_signal": 0}
         circuit_breaker_triggered = False
@@ -176,6 +197,7 @@ class BacktestEngine:
                 if closed:
                     trade_pnls.append(position.realized - position.fees)
                     holding_bars.append(current_holding)
+                    total_slippage += position.slippage
                     position = None
 
             marked_equity = equity + self._unrealized(position, candle.close)
@@ -209,6 +231,7 @@ class BacktestEngine:
             total_fees += position.fees - fees_before_close
             trade_pnls.append(position.realized - position.fees)
             holding_bars.append(current_holding)
+            total_slippage += position.slippage
 
         gross_profit = sum((pnl for pnl in trade_pnls if pnl > 0), Decimal("0"))
         gross_loss = -sum((pnl for pnl in trade_pnls if pnl < 0), Decimal("0"))
@@ -233,6 +256,7 @@ class BacktestEngine:
             signal_rejections=signal_rejections,
             circuit_breaker_triggered=circuit_breaker_triggered,
             equity_curve=curve,
+            slippage=total_slippage,
         )
 
     def _signal(
@@ -322,22 +346,41 @@ class BacktestEngine:
             if side == PositionSide.LONG
             else Decimal("1") - config.slippage_rate
         )
-        risk_distance = current_atr * config.stop_atr
+        stop_atr = (
+            config.manual_stop_atr
+            if config.manual_exit_levels_enabled
+            else config.stop_atr
+        )
+        risk_distance = current_atr * stop_atr
         risk_amount = equity * config.risk_pct
         quantity = risk_amount / risk_distance
         direction = Decimal("1") if side == PositionSide.LONG else Decimal("-1")
         fee = quantity * entry * config.fee_rate
+        entry_slippage = abs(entry - raw_entry) * quantity
+        stop = entry - direction * risk_distance
+        final_distance = (
+            current_atr * config.manual_take_profit_atr
+            if config.manual_exit_levels_enabled
+            else risk_distance * Decimal("2")
+        )
+        tp2 = entry + direction * final_distance
         return SimPosition(
             side=side,
             quantity=quantity,
             remaining=quantity,
             entry=entry,
-            stop=entry - direction * risk_distance,
-            tp1=entry + direction * risk_distance,
-            tp2=entry + direction * risk_distance * Decimal("2"),
+            stop=stop,
+            tp1=first_take_profit(
+                entry=entry,
+                stop_price=stop,
+                final_target=tp2,
+                side=side,
+            ),
+            tp2=tp2,
             highest=entry,
             lowest=entry,
             fees=fee,
+            slippage=entry_slippage,
         )
 
     def _manage(
@@ -367,14 +410,15 @@ class BacktestEngine:
                 else candle.low <= position.tp1
             )
             if tp1_hit:
-                quantity = position.quantity * Decimal("0.4")
+                quantity = position.quantity * TP1_FRACTION
                 pnl, fee = self._realize(position, position.tp1, quantity, config)
                 realized_now += pnl
                 fees_now += fee
                 position.tp1_hit = True
-                fee_buffer = position.entry * config.fee_rate * Decimal("2")
-                position.stop = position.entry + (
-                    fee_buffer if position.side == PositionSide.LONG else -fee_buffer
+                position.stop = breakeven_stop(
+                    position.entry,
+                    position.side,
+                    config.fee_rate * Decimal("2"),
                 )
 
         if position.tp1_hit and not position.tp2_hit:
@@ -384,21 +428,21 @@ class BacktestEngine:
                 else candle.low <= position.tp2
             )
             if tp2_hit:
-                quantity = min(position.quantity * Decimal("0.4"), position.remaining)
+                quantity = min(position.quantity * TP2_FRACTION, position.remaining)
                 pnl, fee = self._realize(position, position.tp2, quantity, config)
                 realized_now += pnl
                 fees_now += fee
                 position.tp2_hit = True
 
         if position.tp2_hit and position.remaining > 0 and current_atr > 0:
-            if position.side == PositionSide.LONG:
-                position.stop = max(
-                    position.stop, position.highest - current_atr * config.trailing_atr
-                )
-            else:
-                position.stop = min(
-                    position.stop, position.lowest + current_atr * config.trailing_atr
-                )
+            position.stop = trailing_stop(
+                current_stop=position.stop,
+                side=position.side,
+                highest=position.highest,
+                lowest=position.lowest,
+                atr=current_atr,
+                atr_multiple=config.trailing_atr,
+            )
         return realized_now, position.remaining <= 0, fees_now
 
     @staticmethod
@@ -414,6 +458,7 @@ class BacktestEngine:
         direction = Decimal("1") if position.side == PositionSide.LONG else Decimal("-1")
         pnl = (exit_price - position.entry) * quantity * direction
         fee = exit_price * quantity * config.fee_rate
+        position.slippage += abs(exit_price - raw_exit) * quantity
         position.realized += pnl
         position.fees += fee
         position.remaining -= quantity

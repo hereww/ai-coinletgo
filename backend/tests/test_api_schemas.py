@@ -83,6 +83,7 @@ def test_replay_request_accepts_inclusive_year_and_rejects_invalid_ranges() -> N
         symbols=["BTCUSDT"],
         start_date="2025-01-01",
         end_date="2025-01-02",
+        factor_research_run_id="0d5f81b1-4a64-4ac9-8d72-e1c4a2f70162",
         backtest_config={
             "max_leverage": 30,
             "trend_adx_min": "18",
@@ -92,6 +93,13 @@ def test_replay_request_accepts_inclusive_year_and_rejects_invalid_ranges() -> N
     )
     assert configured.backtest_config is not None
     assert configured.backtest_config.max_leverage == 30
+    assert configured.factor_research_run_id is not None
+    with pytest.raises(ValidationError, match="only supported for deterministic"):
+        ReplayRequest(
+            mode="recorded_portfolio",
+            portfolio_decision_id="0d5f81b1-4a64-4ac9-8d72-e1c4a2f70162",
+            factor_research_run_id="1d5f81b1-4a64-4ac9-8d72-e1c4a2f70162",
+        )
     with pytest.raises(ValidationError, match="cannot exceed max_stop_atr"):
         ReplayBacktestConfigRequest(stop_atr="3", max_stop_atr="2")
 

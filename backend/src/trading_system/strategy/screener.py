@@ -71,7 +71,7 @@ class MarketScreener:
                 continue
             snapshot.score = self.score(snapshot)
             candidates.append(snapshot)
-        ranked = sorted(candidates, key=lambda item: item.score, reverse=True)
+        ranked = sorted(candidates, key=self._ranking_key)
         return ranked if limit is None else ranked[:limit]
 
     def _market_reasons(self, snapshot: MarketSnapshot) -> list[str]:
@@ -171,4 +171,11 @@ class MarketScreener:
                 continue
             snapshot.score = self.score(snapshot)
             candidates.append(snapshot)
-        return sorted(candidates, key=lambda item: item.score, reverse=True)[:limit]
+        return sorted(candidates, key=self._ranking_key)[:limit]
+
+    @staticmethod
+    def _ranking_key(snapshot: MarketSnapshot) -> tuple[int, Decimal, str]:
+        overlay = snapshot.factor_overlay
+        if overlay is not None and overlay.policy_status == "ACTIVE":
+            return overlay.combined_rank, -snapshot.score, snapshot.symbol
+        return 1_000_000, -snapshot.score, snapshot.symbol

@@ -21,6 +21,7 @@ from trading_system.domain.models import (
     PositionState,
     RiskLimits,
 )
+from trading_system.strategy.exit_policy import manual_atr_exit_prices
 
 
 class PortfolioCompiler:
@@ -59,7 +60,9 @@ class PortfolioCompiler:
             status=PortfolioPlanStatus.REJECTED,
             capital_base=capital_base,
             risk_cap_usdt=risk_cap,
+            factor_policy_snapshot=decision.factor_policy_snapshot,
         )
+        single_trade_risk_cap = capital_base * limits.single_trade_risk_pct
         if decision.expires_at <= now:
             plan.reasons.append("portfolio_decision_expired")
             return plan
@@ -96,7 +99,7 @@ class PortfolioCompiler:
             (
                 risk_cap
                 * allocation.allocation_fraction
-                * snapshots[allocation.symbol].volatility_risk_multiplier
+                * snapshots[allocation.symbol].effective_risk_multiplier
                 if allocation.symbol in snapshots
                 else Decimal("0")
                 for allocation in decision.allocations
@@ -119,6 +122,7 @@ class PortfolioCompiler:
                 snapshot,
                 filters[symbol],
                 risk_cap,
+                single_trade_risk_cap,
                 limits,
             )
             if action.action in {
@@ -153,7 +157,12 @@ class PortfolioCompiler:
                 reductions.append(self._rejected(allocation, "allocation_symbol_not_in_candidates"))
                 continue
             action = self._new_action(
-                allocation, snapshot, filters[allocation.symbol], risk_cap, limits
+                allocation,
+                snapshot,
+                filters[allocation.symbol],
+                risk_cap,
+                single_trade_risk_cap,
+                limits,
             )
             if action.action == PortfolioPlanActionType.OPEN:
                 increases.append((allocation, action))
@@ -208,14 +217,7 @@ class PortfolioCompiler:
             if validation is None and approved_risk + action.target_risk_usdt > risk_cap:
                 validation = "portfolio_risk_capacity_exhausted"
             if validation is None and cooldown_active:
-                # In model-primary mode the model owns the opportunity and
-                # target-risk decision.  A time-based rebalance gate is not a
-                # liquidation safeguard and must not veto a valid model ADD;
-                # hard portfolio, margin, balance, stop and breaker limits
-                # remain enforced below.  Keep the cooldown for the legacy
-                # rule-based mode only.
-                if not limits.model_primary_portfolio_enabled and not strong_trend_override:
-                    validation = "rebalance_cooldown_active"
+                validation = "rebalance_cooldown_active"
             if validation is not None:
                 reductions.append(self._rejected(allocation, validation, source=action))
                 continue
@@ -283,6 +285,7 @@ class PortfolioCompiler:
         snapshot: MarketSnapshot | None,
         exchange_filters: ExchangeFilters,
         risk_cap: Decimal,
+        single_trade_risk_cap: Decimal,
         limits: RiskLimits,
     ) -> PortfolioPlanAction:
         current_risk = position.initial_risk_usdt
@@ -315,7 +318,8 @@ class PortfolioCompiler:
         if distance <= 0:
             return self._rejected(allocation, "rounded_stop_invalid", position)
         target_risk = risk_cap * allocation.allocation_fraction
-        target_risk *= snapshot.volatility_risk_multiplier
+        target_risk *= snapshot.effective_risk_multiplier
+        target_risk = min(target_risk, single_trade_risk_cap)
         target_quantity = self._round_down(target_risk / distance, exchange_filters.step_size)
         if exchange_filters.max_quantity is not None:
             target_quantity = min(target_quantity, exchange_filters.max_quantity)
@@ -356,11 +360,31 @@ class PortfolioCompiler:
                 or allocation.target_price != position.tp2_price
             )
         )
+        if current_risk > single_trade_risk_cap and target_quantity >= position.quantity:
+            reasons = ["single_trade_risk_over_cap"]
+            if tighten:
+                reasons.append("hard_stop_tightened")
+            if target_changed:
+                reasons.append("take_profit_updated")
+            reasons.extend(ignored_target_reasons)
+            return self._action(
+                effective_allocation,
+                (
+                    PortfolioPlanActionType.TIGHTEN_STOP
+                    if tighten or target_changed
+                    else PortfolioPlanActionType.HOLD
+                ),
+                position,
+                target_quantity=position.quantity,
+                target_risk=min(current_risk, position.quantity * distance),
+                stop=stop,
+                reasons=reasons,
+            )
         if (
             target_quantity == position.quantity
             or (
                 target_risk != 0
-                and current_risk <= risk_cap
+                and current_risk <= single_trade_risk_cap
                 and delta_risk < deadband
             )
         ):
@@ -415,6 +439,7 @@ class PortfolioCompiler:
         snapshot: MarketSnapshot,
         exchange_filters: ExchangeFilters,
         risk_cap: Decimal,
+        single_trade_risk_cap: Decimal,
         limits: RiskLimits,
     ) -> PortfolioPlanAction:
         allocation = self._apply_manual_exit_levels(allocation, snapshot, limits)
@@ -459,14 +484,11 @@ class PortfolioCompiler:
         if stop_atr > limits.max_stop_atr:
             return self._rejected(allocation, "stop_too_far")
         net_rr = self._net_reward_risk(entry, allocation, snapshot)
-        if (
-            net_rr < limits.min_net_reward_risk
-            and not model_primary
-            and not strong_trend_override
-        ):
+        if net_rr < limits.min_net_reward_risk:
             return self._rejected(allocation, "net_reward_risk_below_minimum")
         target_risk = risk_cap * allocation.allocation_fraction
-        target_risk *= snapshot.volatility_risk_multiplier
+        target_risk *= snapshot.effective_risk_multiplier
+        target_risk = min(target_risk, single_trade_risk_cap)
         quantity = self._round_down(target_risk / distance, exchange_filters.step_size)
         if quantity_limit is not None:
             quantity = min(quantity, self._round_down(quantity_limit, exchange_filters.step_size))
@@ -559,11 +581,7 @@ class PortfolioCompiler:
                 snapshot.funding_rate
             )
             net_rr = max(Decimal("0"), reward - costs) / (stop_distance + costs)
-            if (
-                net_rr < limits.min_net_reward_risk
-                and not model_primary
-                and not strong_trend_override
-            ):
+            if net_rr < limits.min_net_reward_risk:
                 return "net_reward_risk_below_minimum"
         position_count = len(projected) + (
             1 if action.action == PortfolioPlanActionType.OPEN else 0
@@ -571,20 +589,19 @@ class PortfolioCompiler:
         if position_count > limits.max_positions:
             return "position_count_limit_reached"
         same_direction = sum(item.side == action.side for item in projected.values())
-        if (
+        if same_direction > limits.max_same_direction or (
             action.action == PortfolioPlanActionType.OPEN
             and same_direction >= limits.max_same_direction
-            and not model_primary
-            and not strong_trend_override
         ):
             return "same_direction_limit_reached"
-        if not model_primary and not strong_trend_override:
-            for symbol in projected:
-                if symbol == action.symbol:
-                    continue
-                correlation = abs(self._correlation(action.symbol, symbol, correlations))
-                if correlation > limits.correlation_limit:
-                    return f"correlated_with_{symbol}"
+        for symbol in projected:
+            if symbol == action.symbol:
+                continue
+            correlation = self._correlation(action.symbol, symbol, correlations)
+            if correlation is None:
+                return f"correlation_data_missing:{symbol}"
+            if abs(correlation) > limits.correlation_limit:
+                return f"correlated_with_{symbol}"
         projected_margin = sum(
             (
                 item.quantity * item.mark_price / Decimal(limits.max_leverage)
@@ -685,8 +702,8 @@ class PortfolioCompiler:
     @staticmethod
     def _correlation(
         first: str, second: str, correlations: dict[tuple[str, str], Decimal]
-    ) -> Decimal:
-        return correlations.get((first, second), correlations.get((second, first), Decimal("0")))
+    ) -> Decimal | None:
+        return correlations.get((first, second), correlations.get((second, first)))
 
     @staticmethod
     def _allocation_entry(allocation: PortfolioAllocation, snapshot: MarketSnapshot) -> Decimal:
@@ -807,21 +824,14 @@ class PortfolioCompiler:
         atr = snapshot.atr_15m
         if atr <= 0:
             return allocation
-        structural_buffer = atr * Decimal("0.01")
-        stop_distance = atr * limits.manual_stop_atr
-        target_distance = atr * limits.manual_take_profit_atr
-        if allocation.target_side == PortfolioTargetSide.LONG:
-            stop = min(
-                allocation.entry_min - structural_buffer,
-                allocation.entry_max - stop_distance,
-            )
-            target = allocation.entry_max + target_distance
-        else:
-            stop = max(
-                allocation.entry_max + structural_buffer,
-                allocation.entry_min + stop_distance,
-            )
-            target = allocation.entry_min - target_distance
+        stop, target = manual_atr_exit_prices(
+            side=PositionSide(allocation.target_side.value),
+            entry_min=allocation.entry_min,
+            entry_max=allocation.entry_max,
+            atr=atr,
+            stop_atr=limits.manual_stop_atr,
+            target_atr=limits.manual_take_profit_atr,
+        )
         if stop <= 0 or target <= 0:
             return allocation
         return allocation.model_copy(update={"stop_price": stop, "target_price": target})

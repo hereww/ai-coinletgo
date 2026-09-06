@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import ValidationError
@@ -27,6 +27,7 @@ from trading_system.domain.models import (
     AccountState,
     Candle,
     ExchangeFilters,
+    FactorPolicySnapshot,
     MarketSnapshot,
     PositionReview,
     PositionState,
@@ -42,13 +43,21 @@ from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.repository import Repository
 from trading_system.risk.engine import RiskEngine
 from trading_system.risk.portfolio import PortfolioCompiler
-from trading_system.strategy.factor_research import build_factor_shadow_ranking
+from trading_system.strategy.exit_policy import first_take_profit
+from trading_system.strategy.factor_policy import (
+    build_factor_overlays,
+    build_window_payload,
+    eligible_research_snapshot,
+    mature_window_payload,
+    promotion_metrics,
+    rebalance_window,
+)
 from trading_system.strategy.factors import (
     FactorBar,
     compute_factor_values,
     normalize_factor_values,
 )
-from trading_system.strategy.indicators import atr, pearson_correlation
+from trading_system.strategy.indicators import atr, strict_pearson_correlation
 from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import build_snapshot
 
@@ -419,6 +428,7 @@ class TradingCycle:
             [item.symbol for item in universe],
         )
         snapshots = await self._build_snapshots(universe)
+        snapshots, factor_policy_snapshot = await self._apply_factor_policy(snapshots)
         result.snapshots = len(snapshots)
         await self.repository.save_market_snapshots(snapshots)
         for snapshot in snapshots:
@@ -476,6 +486,7 @@ class TradingCycle:
                     limits,
                     expires_at,
                     input_hash=self._input_hash(candidates, positions),
+                    factor_policy_snapshot=factor_policy_snapshot,
                 )
             analysis = await self.model.analyze(candidates, positions, expires_at)
         except ModelUnavailableError as error:
@@ -665,6 +676,7 @@ class TradingCycle:
         expires_at: datetime,
         *,
         input_hash: str,
+        factor_policy_snapshot: FactorPolicySnapshot,
     ) -> CycleResult:
         snapshot_map = {item.symbol: item for item in snapshots}
         filters: dict[str, ExchangeFilters] = {}
@@ -685,6 +697,7 @@ class TradingCycle:
             "max_positions": limits.max_positions,
             "max_same_direction": limits.max_same_direction,
             "portfolio_risk_pct": str(limits.portfolio_risk_pct),
+            "factor_policy": factor_policy_snapshot.model_dump(mode="json"),
             # Existing positions need the same market context as candidates.
             # Without ATR/trend/volatility data the model tends to close a
             # healthy protected position simply because its thesis cannot be
@@ -719,13 +732,26 @@ class TradingCycle:
             result.detail = self._model_failure_detail(error)
             return result
         await self._mark_model_cadence()
-        last_rebalance_at: datetime | None = None
+        decision = decision.model_copy(
+            update={"factor_policy_snapshot": factor_policy_snapshot}
+        )
         try:
-            raw_last_rebalance = await self.redis.get("portfolio:last-rebalance-at")
-            if raw_last_rebalance:
-                last_rebalance_at = datetime.fromisoformat(str(raw_last_rebalance))
-        except (TypeError, ValueError):
-            last_rebalance_at = None
+            last_rebalance_at = (
+                await self.repository.latest_successful_portfolio_risk_increase_at()
+            )
+        except Exception:
+            logger.exception("portfolio cooldown database source unavailable")
+            result.detail = "组合调仓冷却状态不可用，本轮禁止新增风险"
+            return result
+        if last_rebalance_at is not None:
+            try:
+                await self.redis.set(
+                    "portfolio:last-rebalance-at",
+                    last_rebalance_at.isoformat(),
+                    ex=172_800,
+                )
+            except Exception:
+                logger.debug("portfolio cooldown cache refresh failed", exc_info=True)
         compile_now = datetime.now(UTC)
         plan = self.portfolio.compile(
             decision,
@@ -1144,20 +1170,15 @@ class TradingCycle:
             raise ExchangeError("portfolio entry target is not profitable for side")
         if side == PositionSide.SHORT and target_price >= entry:
             raise ExchangeError("portfolio entry target is not profitable for side")
-        risk = abs(entry - stop_price)
-        if risk <= 0:
-            raise ExchangeError("portfolio entry stop distance is invalid")
-        mechanical = entry + risk if side == PositionSide.LONG else entry - risk
-        if (side == PositionSide.LONG and mechanical < target_price) or (
-            side == PositionSide.SHORT and mechanical > target_price
-        ):
-            return mechanical
-        midpoint = entry + (target_price - entry) / Decimal("2")
-        if side == PositionSide.LONG and not entry < midpoint < target_price:
-            raise ExchangeError("portfolio entry target leaves no valid TP1")
-        if side == PositionSide.SHORT and not target_price < midpoint < entry:
-            raise ExchangeError("portfolio entry target leaves no valid TP1")
-        return midpoint
+        try:
+            return first_take_profit(
+                entry=entry,
+                stop_price=stop_price,
+                final_target=target_price,
+                side=side,
+            )
+        except ValueError as error:
+            raise ExchangeError(str(error)) from error
 
     async def _refresh_after_exit(
         self,
@@ -1269,17 +1290,22 @@ class TradingCycle:
             for peer_candidate in candidates:
                 if candidate.symbol == peer_candidate.symbol:
                     continue
-                result[(candidate.symbol, peer_candidate.symbol)] = pearson_correlation(
+                correlation = strict_pearson_correlation(
                     candidate.recent_returns_1h,
                     peer_candidate.recent_returns_1h,
                 )
+                if correlation is not None:
+                    result[(candidate.symbol, peer_candidate.symbol)] = correlation
             for position in positions:
                 peer = snapshots.get(position.symbol)
-                result[(candidate.symbol, position.symbol)] = (
-                    pearson_correlation(candidate.recent_returns_1h, peer.recent_returns_1h)
-                    if peer is not None
-                    else Decimal("1")
+                if peer is None:
+                    continue
+                correlation = strict_pearson_correlation(
+                    candidate.recent_returns_1h,
+                    peer.recent_returns_1h,
                 )
+                if correlation is not None:
+                    result[(candidate.symbol, position.symbol)] = correlation
         return result
 
     @staticmethod
@@ -1526,23 +1552,187 @@ class TradingCycle:
                         failure.get("symbol"),
                         failure.get("stage"),
                     )
-        try:
-            completed_research = await self.repository.latest_completed_factor_research()
-            if completed_research is not None:
-                shadow = build_factor_shadow_ranking(snapshots, completed_research)
-                if shadow is not None:
-                    shadow_id = await self.repository.save_factor_shadow_ranking(shadow)
-                    logger.info(
-                        "factor shadow ranking saved id=%s research_run_id=%s symbols=%d",
-                        shadow_id,
-                        shadow.get("research_run_id"),
-                        len(shadow.get("rankings", [])),
-                    )
-        except Exception:
-            # Shadow analytics are strictly non-blocking. A persistence or
-            # report-shape failure must never halt market screening or entries.
-            logger.exception("factor shadow ranking unavailable")
         return snapshots
+
+    async def _apply_factor_policy(
+        self, snapshots: list[MarketSnapshot]
+    ) -> tuple[list[MarketSnapshot], FactorPolicySnapshot]:
+        """Freeze factor state, settle one online window, and apply testnet ACTIVE."""
+
+        rank_weight = Decimal(str(self.settings.factor_rank_weight))
+        minimum_multiplier = Decimal(str(self.settings.factor_min_risk_multiplier))
+        required_windows = self.settings.factor_promotion_windows
+        effective_enabled = (
+            self.settings.factor_policy_enabled
+            and self.settings.binance_environment == "testnet"
+        )
+        scored = [
+            item.model_copy(update={"score": self.screener.score(item)})
+            for item in snapshots
+        ]
+        active: dict[str, Any] | None = None
+        shadow: dict[str, Any] | None = None
+        metrics: dict[str, object] = promotion_metrics([], required_windows)
+        failures: list[str] = []
+        applied_status: Literal["ACTIVE", "SHADOW", "FALLBACK", "DISABLED"] = "DISABLED"
+        applied_research_run_id: str | None = None
+        now = datetime.now(UTC)
+        try:
+            latest = await self.repository.latest_completed_factor_research()
+            if latest is not None:
+                frozen = eligible_research_snapshot(latest)
+                if frozen is not None:
+                    await self.repository.sync_factor_policy_candidate(frozen)
+            active = await self.repository.get_factor_policy("ACTIVE")
+            shadow = await self.repository.get_factor_policy("SHADOW")
+            if shadow is not None:
+                shadow_run_id = str(shadow["research_run_id"])
+                due = await self.repository.due_factor_policy_windows(shadow_run_id, now)
+                prices = {item.symbol: item.mark_price for item in scored}
+                for window in due:
+                    matured = mature_window_payload(window["payload"], prices)
+                    if matured is None:
+                        await self.repository.invalidate_factor_policy_window(
+                            str(window["id"]),
+                            {
+                                "invalidated_at": now.isoformat(),
+                                "reason": "insufficient_forward_prices",
+                            },
+                        )
+                        await self._audit_factor_policy(
+                            "factor_policy_window_invalid",
+                            shadow_run_id,
+                            "fallback",
+                            {"window_id": str(window["id"])},
+                        )
+                    else:
+                        await self.repository.mature_factor_policy_window(
+                            str(window["id"]), matured
+                        )
+                windows = await self.repository.list_factor_policy_windows(shadow_run_id)
+                metrics = promotion_metrics(windows, required_windows)
+                try:
+                    _, shadow_ranking = build_factor_overlays(
+                        scored,
+                        shadow["frozen_snapshot"],
+                        status="SHADOW",
+                        rank_weight=rank_weight,
+                        minimum_risk_multiplier=minimum_multiplier,
+                    )
+                    start, end = rebalance_window(now, shadow["frozen_snapshot"])
+                    created = await self.repository.create_factor_policy_window(
+                        research_run_id=shadow_run_id,
+                        window_start=start,
+                        window_end=end,
+                        payload=build_window_payload(
+                            shadow_ranking,
+                            window_start=start,
+                            window_end=end,
+                            candidate_count=self.settings.candidate_count,
+                        ),
+                    )
+                    shadow_ranking["window_start"] = start.isoformat()
+                    shadow_ranking["window_end"] = end.isoformat()
+                    shadow_ranking["window_created"] = created
+                    shadow_ranking["promotion"] = metrics
+                    await self.repository.save_factor_shadow_ranking(shadow_ranking)
+                except Exception as error:
+                    failures.append(f"shadow_overlay_invalid:{type(error).__name__}")
+                    logger.exception("factor shadow overlay unavailable")
+                    await self._audit_factor_policy(
+                        "factor_policy_cycle_fallback",
+                        shadow_run_id,
+                        "fallback",
+                        {"scope": "shadow", "error_type": type(error).__name__},
+                    )
+            if effective_enabled and active is not None and scored:
+                try:
+                    overlays, _ = build_factor_overlays(
+                        scored,
+                        active["frozen_snapshot"],
+                        status="ACTIVE",
+                        rank_weight=rank_weight,
+                        minimum_risk_multiplier=minimum_multiplier,
+                    )
+                    scored = [
+                        item.model_copy(update={"factor_overlay": overlays[item.symbol]})
+                        for item in scored
+                    ]
+                    applied_status = "ACTIVE"
+                    applied_research_run_id = str(active["research_run_id"])
+                except Exception as error:
+                    applied_status = "FALLBACK"
+                    failures.append(f"active_overlay_invalid:{type(error).__name__}")
+                    logger.exception("active factor overlay fell back for this cycle")
+                    await self._audit_factor_policy(
+                        "factor_policy_cycle_fallback",
+                        str(active["research_run_id"]),
+                        "fallback",
+                        {"scope": "active", "error_type": type(error).__name__},
+                    )
+            if (
+                shadow is not None
+                and self.settings.binance_environment == "testnet"
+                and bool(metrics.get("eligible_for_promotion"))
+            ):
+                promoted = await self.repository.promote_factor_policy(
+                    str(shadow["research_run_id"])
+                )
+                if promoted:
+                    await self._audit_factor_policy(
+                        "factor_policy_promoted",
+                        str(shadow["research_run_id"]),
+                        "success",
+                        {"promotion": metrics, "effective": "next_cycle"},
+                    )
+        except Exception as error:
+            failures.append(f"factor_policy_unavailable:{type(error).__name__}")
+            applied_status = "FALLBACK" if effective_enabled else "DISABLED"
+            logger.exception("factor policy orchestration unavailable")
+            await self._audit_factor_policy(
+                "factor_policy_cycle_fallback",
+                "factor-policy",
+                "fallback",
+                {"scope": "policy", "error_type": type(error).__name__},
+            )
+        policy_snapshot = FactorPolicySnapshot(
+            enabled=effective_enabled,
+            environment=self.settings.binance_environment,
+            active_research_run_id=(
+                str(active["research_run_id"]) if active is not None else None
+            ),
+            shadow_research_run_id=(
+                str(shadow["research_run_id"]) if shadow is not None else None
+            ),
+            applied_research_run_id=applied_research_run_id,
+            applied_status=applied_status,
+            rank_weight=rank_weight,
+            minimum_risk_multiplier=minimum_multiplier,
+            promotion_windows=required_windows,
+            matured_windows=int(str(metrics.get("matured_windows", 0))),
+            promotion_metrics=metrics,
+            failure_reasons=failures,
+            captured_at=now,
+        )
+        return scored, policy_snapshot
+
+    async def _audit_factor_policy(
+        self,
+        action: str,
+        resource: str,
+        outcome: str,
+        detail: dict[str, object],
+    ) -> None:
+        try:
+            await self.repository.audit(
+                actor="worker",
+                action=action,
+                resource=resource,
+                outcome=outcome,
+                detail=detail,
+            )
+        except Exception:
+            logger.exception("factor policy audit write failed action=%s", action)
 
     @staticmethod
     def _snapshot_failure(
@@ -1811,11 +2001,12 @@ class TradingCycle:
         for position in positions:
             peer = snapshots.get(position.symbol)
             if peer is None:
-                result[position.symbol] = Decimal("1")
-            else:
-                result[position.symbol] = pearson_correlation(
-                    candidate.recent_returns_1h, peer.recent_returns_1h
-                )
+                continue
+            correlation = strict_pearson_correlation(
+                candidate.recent_returns_1h, peer.recent_returns_1h
+            )
+            if correlation is not None:
+                result[position.symbol] = correlation
         return result
 
     @staticmethod

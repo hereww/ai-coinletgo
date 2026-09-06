@@ -283,9 +283,12 @@
 .factor-empty strong { color: var(--text-section); font-size: 12px; }
 .factor-empty span { color: var(--muted); font-size: 10px; }
 .factor-shadow-results { min-height: 240px; }
+.factor-policy-status { display: grid; gap: 12px; }
+.factor-policy-progress { display: grid; grid-template-columns: minmax(160px, 0.35fr) 1fr; gap: 12px; align-items: center; padding: 0 14px 14px; color: var(--muted); font-size: 11px; }
+.factor-policy-progress progress { width: 100%; height: 8px; accent-color: var(--positive); }
 .factor-shadow-meta { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 10px; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .factor-shadow-meta span { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-subtle); }
-.factor-shadow-table { min-width: 760px; table-layout: fixed; }
+.factor-shadow-table { min-width: 980px; table-layout: fixed; }
 .factor-shadow-table th:first-child, .factor-shadow-table td:first-child { width: 52px; }
 .factor-shadow-table th:nth-child(2), .factor-shadow-table td:nth-child(2) { width: 110px; }
 .factor-shadow-table th:nth-child(3), .factor-shadow-table td:nth-child(3) { width: 100px; }

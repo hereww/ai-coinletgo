@@ -105,6 +105,10 @@ class ConfigUpdateRequest(BaseModel):
     portfolio_strategy_enabled: bool | None = None
     portfolio_rebalance_deadband_fraction: Decimal | None = Field(default=None, ge=0, le=1)
     portfolio_rebalance_cooldown_minutes: int | None = Field(default=None, ge=0, le=1_440)
+    factor_policy_enabled: bool | None = None
+    factor_rank_weight: Decimal | None = Field(default=None, ge=0, le=1)
+    factor_min_risk_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
+    factor_promotion_windows: int | None = Field(default=None, ge=1, le=365)
     hft_enabled: bool | None = None
     hft_dry_run: bool | None = None
     hft_symbols: list[str] | None = Field(default=None, max_length=10)
@@ -272,6 +276,7 @@ class ReplayRequest(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     portfolio_decision_id: str | None = Field(default=None, min_length=36, max_length=36)
+    factor_research_run_id: str | None = Field(default=None, min_length=36, max_length=36)
     backtest_config: ReplayBacktestConfigRequest | None = None
     # Retained solely so older clients receive a clear validation failure instead
     # of silently interpreting a model sample as a backtest result.
@@ -302,8 +307,13 @@ class ReplayRequest(BaseModel):
                 raise ValueError("end_date cannot precede start_date")
             if (end - start).days > 365:
                 raise ValueError("replay range cannot exceed 366 days")
-        elif self.portfolio_decision_id is None:
-            raise ValueError("recorded_portfolio replay requires portfolio_decision_id")
+        else:
+            if self.portfolio_decision_id is None:
+                raise ValueError("recorded_portfolio replay requires portfolio_decision_id")
+            if self.factor_research_run_id is not None:
+                raise ValueError(
+                    "factor_research_run_id is only supported for deterministic replay"
+                )
         return self
 
 

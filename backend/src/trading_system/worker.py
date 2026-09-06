@@ -12,7 +12,11 @@ from redis.asyncio import Redis
 from trading_system.ai.client import ResponsesModelClient
 from trading_system.config import get_settings
 from trading_system.exchange.binance import BinanceUSDMarketClient
-from trading_system.exchange.market_stream import BinanceMarketStream, BinanceUserDataStream
+from trading_system.exchange.market_stream import (
+    BinanceMarketStream,
+    BinancePublicMarketCache,
+    BinanceUserDataStream,
+)
 from trading_system.hft.runner import HftRunner
 from trading_system.notifications.reports import TelegramReportScheduler
 from trading_system.notifications.telegram import TelegramNotifier
@@ -48,6 +52,15 @@ async def run_worker() -> None:
     repository = Repository(database, settings.app_timezone)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
+    public_market = BinancePublicMarketCache(
+        settings.binance_ws_url,
+        proxy_url=settings.binance_http_proxy_url,
+    )
+    exchange.attach_market_cache(public_market)
+    if exchange.configured and (
+        not settings.binance_proxy_enabled or settings.binance_http_proxy_configured
+    ):
+        public_market.start()
     model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
     cycle = TradingCycle(settings, redis, repository, exchange, model, notifier)
@@ -176,6 +189,7 @@ async def run_worker() -> None:
         if hft_task is not None:
             with suppress(asyncio.CancelledError):
                 await hft_task
+        await public_market.close()
         with suppress(asyncio.CancelledError):
             await heartbeat_task
         if user_stream is not None:

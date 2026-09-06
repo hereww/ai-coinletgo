@@ -15,6 +15,7 @@ from trading_system.api.security import SecurityService
 from trading_system.backtest.service import ReplayService
 from trading_system.config import get_settings
 from trading_system.exchange.binance import BinanceUSDMarketClient
+from trading_system.exchange.market_stream import BinancePublicMarketCache
 from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.database import Database
 from trading_system.persistence.repository import Repository
@@ -36,6 +37,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     repository = Repository(database)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
+    market_stream = BinancePublicMarketCache(
+        settings.binance_ws_url,
+        proxy_url=settings.binance_http_proxy_url,
+    )
+    exchange.attach_market_cache(market_stream)
+    if exchange.configured and (
+        not settings.binance_proxy_enabled or settings.binance_http_proxy_configured
+    ):
+        market_stream.start()
     research_exchange = BinanceUSDMarketClient(
         settings,
         public_base_url=settings.binance_live_base_url,
@@ -45,7 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
-    replay_service = ReplayService(repository, exchange, notifier, settings)
+    replay_service = ReplayService(repository, research_exchange, notifier, settings)
     factor_research_service = FactorResearchService(
         repository, research_exchange, settings.app_timezone
     )
@@ -67,6 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await model.close()
     await notifier.close()
+    await market_stream.close()
     await research_exchange.close()
     await exchange.close()
     await redis.aclose()

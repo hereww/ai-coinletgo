@@ -14,6 +14,7 @@ from trading_system.strategy.indicators import (
     ema,
     pearson_correlation,
     pullback_signal,
+    strict_pearson_correlation,
     trend_direction,
     volatility_risk_multiplier,
 )
@@ -26,6 +27,8 @@ def test_indicator_basics_and_conservative_short_correlation() -> None:
     assert atr([]) == 0
     assert trend_direction([]) == 0
     assert pearson_correlation([Decimal("1")] * 10, [Decimal("1")] * 10) == 1
+    assert strict_pearson_correlation([Decimal("1")] * 10, [Decimal("1")] * 10) is None
+    assert strict_pearson_correlation([Decimal("1")] * 20, [Decimal("1")] * 20) is None
 
 
 def test_market_regime_and_volatility_risk_scaling_are_deterministic() -> None:

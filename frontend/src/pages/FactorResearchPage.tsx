@@ -97,6 +97,11 @@ export default function FactorResearchPage() {
     queryFn: api.factorShadowRankings,
     refetchInterval: 10_000,
   })
+  const policy = useQuery({
+    queryKey: ['factor-policy'],
+    queryFn: api.factorPolicyStatus,
+    refetchInterval: 10_000,
+  })
   const research = useMutation({
     mutationFn: api.researchFactors,
     onSuccess: (submission) => {
@@ -144,8 +149,27 @@ export default function FactorResearchPage() {
   return <div className="factor-page">
     <PageHeader
       title="因子研究"
-      subtitle="生产公共行情的只读横截面研究 · 不连接实盘信号与执行"
+      subtitle="横截面研究、在线影子窗口与测试网升版状态"
     />
+
+    {policy.data ? <section className="surface factor-policy-status">
+      <div className="section-head">
+        <h2>策略版本</h2>
+        <span>{policy.data.enabled ? '测试网因子执行已启用' : '因子执行已关闭'}</span>
+      </div>
+      <div className="factor-metric-strip" aria-label="因子升版进度">
+        <div><span>ACTIVE</span><strong>{policy.data.active?.research_run_id.slice(0, 8) ?? '—'}</strong></div>
+        <div><span>SHADOW</span><strong>{policy.data.shadow?.research_run_id.slice(0, 8) ?? '—'}</strong></div>
+        <div><span>成熟窗口</span><strong>{policy.data.promotion.matured_windows}/{policy.data.promotion.required_windows}</strong></div>
+        <div><span>方向调整 IC</span><strong>{formatMetric(policy.data.promotion.oriented_mean_ic === null ? null : Number(policy.data.promotion.oriented_mean_ic))}</strong></div>
+        <div><span>影子净收益</span><strong>{formatPercent(Number(policy.data.promotion.shadow_net_return))}</strong></div>
+        <div><span>升版资格</span><strong className={policy.data.promotion.eligible_for_promotion ? 'positive' : 'warning'}>{policy.data.promotion.eligible_for_promotion ? '通过' : '未通过'}</strong></div>
+      </div>
+      <div className="factor-policy-progress">
+        <progress value={Number(policy.data.promotion.progress)} max={1} />
+        <span>{policy.data.promotion.failure_reasons.length ? policy.data.promotion.failure_reasons.join(' · ') : '全部升版门槛已通过，下一交易周期切换'}</span>
+      </div>
+    </section> : null}
 
     <section className="surface factor-workbench">
       <form className="factor-form" onSubmit={submit}>
@@ -287,7 +311,7 @@ export default function FactorResearchPage() {
       {shadow.data?.[0] ? <section className="surface factor-shadow-results">
         <div className="section-head">
           <h2>影子因子排名</h2>
-          <span>仅记录，不改变候选合约、风控或订单</span>
+          <span>80% 原排名 + 20% 因子排名；SHADOW 不影响订单</span>
         </div>
         <div className="factor-shadow-meta">
           <span>研究任务 {shadow.data[0].research_run_id.slice(0, 8)}</span>
@@ -296,13 +320,16 @@ export default function FactorResearchPage() {
         </div>
         <div className="table-scroll">
           <table className="data-table factor-shadow-table">
-            <thead><tr><th>排名</th><th>合约</th><th>综合分数</th><th>因子覆盖</th><th>因子贡献</th></tr></thead>
-            <tbody>{shadow.data[0].payload.rankings.map((row, index) => <tr key={row.symbol}>
-              <td className="mono">{index + 1}</td>
+            <thead><tr><th>综合排名</th><th>合约</th><th>原排名</th><th>因子排名</th><th>综合分</th><th>风险倍率</th><th>覆盖率</th><th>因子贡献</th></tr></thead>
+            <tbody>{shadow.data[0].payload.rankings.map((row) => <tr key={row.symbol}>
+              <td className="mono">{row.combined_rank}</td>
               <td><strong>{row.symbol}</strong></td>
-              <td className={row.score < 0 ? 'negative mono' : 'mono'}>{formatMetric(row.score)}</td>
-              <td className="mono">{formatPercent(row.factor_coverage)}</td>
-              <td className="factor-contributions">{Object.entries(row.contributions).map(([key, value]) => `${key} ${value >= 0 ? '+' : ''}${value.toFixed(2)}`).join(' · ')}</td>
+              <td className="mono">{row.baseline_rank}</td>
+              <td className="mono">{row.factor_rank}</td>
+              <td className="mono">{formatMetric(Number(row.combined_score))}</td>
+              <td className="mono">{Number(row.risk_multiplier).toFixed(2)}×</td>
+              <td className="mono">{formatPercent(Number(row.factor_coverage))}</td>
+              <td className="factor-contributions">{Object.entries(row.contributions).map(([key, value]) => { const numeric = Number(value); return `${key} ${numeric >= 0 ? '+' : ''}${numeric.toFixed(2)}` }).join(' · ')}</td>
             </tr>)}</tbody>
           </table>
         </div>

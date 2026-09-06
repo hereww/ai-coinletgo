@@ -489,9 +489,11 @@ async def test_factor_research_run_lifecycle_is_persisted(tmp_path: object) -> N
         completed_id = await repository.create_factor_research_run(parameters)
         await repository.set_factor_research_running(completed_id)
         await repository.complete_factor_research(completed_id, {"summary": {"factor_count": 12}})
+        completed = await repository.get_factor_research_run(completed_id)
         failed_id = await repository.create_factor_research_run(parameters)
         await repository.fail_factor_research(failed_id, "market source unavailable")
         rows = await repository.list_factor_research_runs()
+        missing = await repository.get_factor_research_run("missing")
     finally:
         await database.dispose()
 
@@ -499,6 +501,9 @@ async def test_factor_research_run_lifecycle_is_persisted(tmp_path: object) -> N
     assert by_id[completed_id]["status"] == "COMPLETED"
     assert by_id[completed_id]["report"] == {"summary": {"factor_count": 12}}
     assert by_id[completed_id]["completed_at"] is not None
+    assert completed is not None
+    assert completed["id"] == completed_id
+    assert missing is None
     assert by_id[failed_id]["status"] == "FAILED"
     assert by_id[failed_id]["report"] == {"error": "market source unavailable"}
 
@@ -525,3 +530,42 @@ async def test_factor_shadow_ranking_is_persisted_and_listed(tmp_path: object) -
     assert rows[0]["id"] == ranking_id
     assert rows[0]["research_run_id"] == "factor-run-1"
     assert rows[0]["payload"] == payload
+
+
+@pytest.mark.asyncio
+async def test_factor_policy_candidate_replacement_and_window_deduplication(
+    tmp_path: object,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'factor-policy.db'}")
+    await database.create_schema()
+    repository = Repository(database)
+    first = {
+        "research_run_id": "run-1",
+        "parameters": {"interval": "1h", "rebalance_bars": 24},
+        "factors": [{"key": "momentum", "direction": "POSITIVE"}],
+    }
+    second = {**first, "research_run_id": "run-2"}
+    start = datetime(2026, 9, 6, tzinfo=UTC)
+    try:
+        await repository.sync_factor_policy_candidate(first)
+        await repository.sync_factor_policy_candidate(second)
+        shadow = await repository.get_factor_policy("SHADOW")
+        created = await repository.create_factor_policy_window(
+            research_run_id="run-2",
+            window_start=start,
+            window_end=start + timedelta(days=1),
+            payload={"rankings": []},
+        )
+        duplicate = await repository.create_factor_policy_window(
+            research_run_id="run-2",
+            window_start=start,
+            window_end=start + timedelta(days=1),
+            payload={"rankings": []},
+        )
+    finally:
+        await database.dispose()
+
+    assert shadow is not None
+    assert shadow["research_run_id"] == "run-2"
+    assert created is True
+    assert duplicate is False

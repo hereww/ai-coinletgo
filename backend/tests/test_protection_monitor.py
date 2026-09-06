@@ -339,6 +339,27 @@ def test_ai_reduce_does_not_masquerade_as_completed_tp1() -> None:
     assert intent.tp2_price == Decimal("0.8912")
 
 
+def test_take_profit_repair_uses_manual_atr_final_target_when_enabled() -> None:
+    current = position(
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98.2"),
+        tp1_price=None,
+        tp2_price=None,
+    )
+
+    intent = PositionProtectionMonitor._repair_intent(
+        current,
+        snapshot=snapshot(atr_15m=Decimal("1")),
+        manual_exit_levels_enabled=True,
+        manual_take_profit_atr=Decimal("5"),
+    )
+
+    assert intent.stop_price == Decimal("98.2")
+    assert intent.tp1_price == Decimal("101.8")
+    assert intent.tp2_price == Decimal("105")
+
+
 @pytest.mark.asyncio
 async def test_verified_take_profit_repair_resumes_only_monitor_paused_testnet() -> None:
     current = position(

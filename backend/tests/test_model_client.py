@@ -15,6 +15,7 @@ from trading_system.ai.client import (
     ResponsesModelClient,
 )
 from trading_system.config import Settings
+from trading_system.domain.models import FactorOverlay
 
 
 def model_settings(tmp_path: object) -> Settings:
@@ -123,7 +124,8 @@ async def test_portfolio_prompt_keeps_hard_risk_contract_explicit_in_model_prima
 
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
     assert "趋势、ADX、15分钟触发" in system_text
-    assert "净盈亏比只作为模型判断证据" in system_text
+    assert "最低净盈亏比仍是本地硬限制" in system_text
+    assert "最低净盈亏比为" not in system_text
     assert "本地硬风控" in system_text
     assert "所有结果继续接受本地硬风控" in system_text
     assert "entry_range_min_width_abs" in system_text
@@ -161,13 +163,13 @@ async def test_portfolio_prompt_uses_runtime_reward_risk_floor(tmp_path: object)
         await client.close()
 
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
-    assert "最低净盈亏比为 1.8R" in system_text
+    assert "输出目标必须满足 1.8R" in system_text
     context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
     assert context["entry_policy"]["min_net_reward_risk"] == 1.8
 
 
 @pytest.mark.asyncio
-async def test_portfolio_strong_uptrend_bypasses_minimum_reward_risk_contract(
+async def test_portfolio_strong_uptrend_keeps_minimum_reward_risk_contract(
     tmp_path: object,
 ) -> None:
     expires_at = datetime.now(UTC) + timedelta(minutes=15)
@@ -318,6 +320,57 @@ async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
     assert allocation.entry_max == Decimal("100.2")
     assert allocation.stop_price == Decimal("98.8")
     assert allocation.target_price == Decimal("104.0")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_payload_includes_frozen_factor_overlay_without_raw_values(
+    tmp_path: object,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        output = {
+            "market_regime": "TRENDING",
+            "portfolio_risk_budget_fraction": 0,
+            "allocations": [],
+            "summary": "本轮保持观察",
+            "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        }
+        return httpx.Response(200, json={"output_text": json.dumps(output)})
+
+    candidate = snapshot(
+        factor_values={"momentum_5d": Decimal("9.9")},
+        factor_overlay=FactorOverlay(
+            research_run_id="run-factor-1",
+            policy_status="ACTIVE",
+            baseline_score=Decimal("3"),
+            baseline_percentile=Decimal("0.8"),
+            factor_score=Decimal("1.2"),
+            factor_percentile=Decimal("0.75"),
+            combined_score=Decimal("0.79"),
+            factor_coverage=Decimal("1"),
+            contributions={"momentum_5d": Decimal("1.2")},
+            risk_multiplier=Decimal("0.9375"),
+            baseline_rank=1,
+            factor_rank=2,
+            combined_rank=1,
+            rank_change=0,
+        ),
+    )
+    client = ResponsesModelClient(model_settings(tmp_path), transport=httpx.MockTransport(handler))
+    try:
+        await client.analyze_portfolio(
+            [candidate], [], datetime.now(UTC) + timedelta(minutes=15)
+        )
+    finally:
+        await client.close()
+
+    context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
+    sent_candidate = context["candidates"][0]
+    assert sent_candidate["factor_overlay"]["research_run_id"] == "run-factor-1"
+    assert sent_candidate["factor_overlay"]["risk_multiplier"] == "0.9375"
+    assert "factor_values" not in sent_candidate
 
 
 @pytest.mark.asyncio
@@ -743,7 +796,7 @@ async def test_portfolio_response_is_structured_and_identity_is_stable(tmp_path:
     assert first.decision_id == second.decision_id
     assert first.allocations[0].allocation_id == second.allocations[0].allocation_id
     assert first.model_name == "gpt-5.6"
-    assert first.prompt_version == "portfolio-v1.3"
+    assert first.prompt_version == "portfolio-v1.4-factor-policy"
     assert captured[0]["text"]["format"]["name"] == "portfolio_decision"  # type: ignore[index]
     payload_text = json.dumps(captured[0])
     assert "equity" not in payload_text

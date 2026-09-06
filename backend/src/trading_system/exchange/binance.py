@@ -30,6 +30,8 @@ from trading_system.exchange.base import (
     ExchangeGateway,
     ExchangeUnknownStatusError,
 )
+from trading_system.exchange.market_stream import BinancePublicMarketCache
+from trading_system.strategy.exit_policy import TP1_FRACTION, TP2_FRACTION
 
 logger = logging.getLogger("trading-worker.binance")
 
@@ -58,6 +60,12 @@ class BinanceUSDMarketClient(ExchangeGateway):
         )
         self._filter_cache: dict[str, ExchangeFilters] = {}
         self._leverage_cache: dict[str, int] = {}
+        self._exchange_info_cache: tuple[float, dict[str, Any]] | None = None
+        self._exchange_info_lock = asyncio.Lock()
+        self._market_cache: BinancePublicMarketCache | None = None
+        self._kline_cache: dict[tuple[str, str, int], tuple[float, list[Candle]]] = {}
+        self._open_interest_cache: dict[str, tuple[float, Decimal]] = {}
+        self._book_depth_cache: dict[tuple[str, int], tuple[float, Decimal]] = {}
         self.last_income_ledger: list[dict[str, object]] = []
         self._income_cached_at = 0.0
         self._all_algo_cache: tuple[float, list[dict[str, Any]]] | None = None
@@ -84,6 +92,11 @@ class BinanceUSDMarketClient(ExchangeGateway):
     @property
     def configured(self) -> bool:
         return bool(self.api_key and self.api_secret)
+
+    def attach_market_cache(self, market_cache: BinancePublicMarketCache) -> None:
+        """Use the process-local public WebSocket feed for live market reads."""
+
+        self._market_cache = market_cache
 
     async def close(self) -> None:
         await self.http.aclose()
@@ -135,7 +148,17 @@ class BinanceUSDMarketClient(ExchangeGateway):
                 else "Binance connection failed"
             )
             return False, detail
-        except (ExchangeError, KeyError, ValueError) as error:
+        except ExchangeError as error:
+            if error.code == -1003 or error.http_status in {418, 429}:
+                remaining = max(1, int(error.retry_after_seconds or 60))
+                return (
+                    False,
+                    "Binance REST 限流冷却中，"
+                    f"约 {remaining // 60 + int(remaining % 60 > 0)} 分钟后恢复；"
+                    "公共实时行情继续使用 WebSocket。",
+                )
+            return False, str(error)
+        except (KeyError, ValueError) as error:
             return False, str(error)
 
     async def get_account_state(self) -> AccountState:
@@ -434,16 +457,90 @@ class BinanceUSDMarketClient(ExchangeGateway):
         self._all_algo_cache = (now, orders)
         return list(orders)
 
+    async def _get_exchange_info(self) -> dict[str, Any]:
+        """Cache static symbol metadata instead of downloading it every cycle."""
+
+        now = time.monotonic()
+        if (
+            self._exchange_info_cache is not None
+            and now - self._exchange_info_cache[0] < 6 * 60 * 60
+        ):
+            return self._exchange_info_cache[1]
+        async with self._exchange_info_lock:
+            now = time.monotonic()
+            if (
+                self._exchange_info_cache is not None
+                and now - self._exchange_info_cache[0] < 6 * 60 * 60
+            ):
+                return self._exchange_info_cache[1]
+            body = await self._request("GET", "/fapi/v1/exchangeInfo")
+            if not isinstance(body, dict) or not isinstance(body.get("symbols"), list):
+                raise ExchangeError("Binance exchange info is malformed")
+            self._exchange_info_cache = (time.monotonic(), body)
+            return body
+
+    async def _websocket_market_maps(
+        self, exchange_info: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+        """Build universe maps from the all-market public WebSocket feed."""
+
+        if self._market_cache is None:
+            return None
+        symbols = {
+            str(item.get("symbol"))
+            for item in exchange_info.get("symbols", [])
+            if isinstance(item, dict)
+            and str(item.get("symbol", "")).isascii()
+            and str(item.get("symbol", "")).isalnum()
+            and item.get("quoteAsset") == "USDT"
+            and item.get("contractType") == "PERPETUAL"
+            and item.get("status") == "TRADING"
+        }
+        if not symbols or not await self._market_cache.wait_for_symbols(symbols):
+            return None
+        rows = self._market_cache.snapshots()
+        if not symbols.issubset(rows):
+            return None
+        ticker_map = {
+            symbol: {"symbol": symbol, "quoteVolume": row["quote_volume_24h"]}
+            for symbol, row in rows.items()
+            if symbol in symbols
+        }
+        book_map = {
+            symbol: {
+                "symbol": symbol,
+                "bidPrice": row["best_bid"],
+                "askPrice": row["best_ask"],
+            }
+            for symbol, row in rows.items()
+            if symbol in symbols
+        }
+        premium_map = {
+            symbol: {
+                "symbol": symbol,
+                "markPrice": row["mark_price"],
+                "indexPrice": row["index_price"],
+                "lastFundingRate": row["funding_rate"],
+            }
+            for symbol, row in rows.items()
+            if symbol in symbols
+        }
+        return ticker_map, book_map, premium_map
+
     async def get_universe(self, limit: int) -> list[UniverseSymbol]:
-        exchange_info, tickers, books, premiums = await asyncio.gather(
-            self._request("GET", "/fapi/v1/exchangeInfo"),
-            self._request("GET", "/fapi/v1/ticker/24hr"),
-            self._request("GET", "/fapi/v1/ticker/bookTicker"),
-            self._request("GET", "/fapi/v1/premiumIndex"),
-        )
-        ticker_map = {row["symbol"]: row for row in tickers}
-        book_map = {row["symbol"]: row for row in books}
-        premium_map = {row["symbol"]: row for row in premiums}
+        exchange_info = await self._get_exchange_info()
+        market_maps = await self._websocket_market_maps(exchange_info)
+        if market_maps is None:
+            tickers, books, premiums = await asyncio.gather(
+                self._request("GET", "/fapi/v1/ticker/24hr"),
+                self._request("GET", "/fapi/v1/ticker/bookTicker"),
+                self._request("GET", "/fapi/v1/premiumIndex"),
+            )
+            ticker_map = {row["symbol"]: row for row in tickers}
+            book_map = {row["symbol"]: row for row in books}
+            premium_map = {row["symbol"]: row for row in premiums}
+        else:
+            ticker_map, book_map, premium_map = market_maps
         now_ms = int(time.time() * 1000)
         rows: list[UniverseSymbol] = []
         for symbol_info in exchange_info["symbols"]:
@@ -533,10 +630,21 @@ class BinanceUSDMarketClient(ExchangeGateway):
         return rows if limit <= 0 else rows[:limit]
 
     async def get_open_interest(self, symbol: str) -> Decimal:
+        cached = self._open_interest_cache.get(symbol)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < 300:
+            return cached[1]
         body = await self._request("GET", "/fapi/v1/openInterest", {"symbol": symbol})
-        return Decimal(body["openInterest"])
+        value = Decimal(body["openInterest"])
+        self._open_interest_cache[symbol] = (time.monotonic(), value)
+        return value
 
     async def get_book_depth(self, symbol: str, limit: int = 20) -> Decimal:
+        cache_key = (symbol, limit)
+        cached = self._book_depth_cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < 900:
+            return cached[1]
         body = await self._request("GET", "/fapi/v1/depth", {"symbol": symbol, "limit": limit})
         bids = sum(
             (Decimal(price) * Decimal(quantity) for price, quantity in body.get("bids", [])),
@@ -546,7 +654,9 @@ class BinanceUSDMarketClient(ExchangeGateway):
             (Decimal(price) * Decimal(quantity) for price, quantity in body.get("asks", [])),
             Decimal("0"),
         )
-        return min(bids, asks)
+        value = min(bids, asks)
+        self._book_depth_cache[cache_key] = (time.monotonic(), value)
+        return value
 
     async def get_order_book_snapshot(self, symbol: str, limit: int = 1_000) -> dict[str, Any]:
         if limit < 5 or limit > 1_000:
@@ -563,7 +673,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
     async def get_filters(self, symbol: str) -> ExchangeFilters:
         if symbol in self._filter_cache:
             return self._filter_cache[symbol]
-        body = await self._request("GET", "/fapi/v1/exchangeInfo")
+        body = await self._get_exchange_info()
         row = next((item for item in body["symbols"] if item["symbol"] == symbol), None)
         if row is None:
             raise ExchangeError(f"unknown symbol {symbol}")
@@ -588,11 +698,17 @@ class BinanceUSDMarketClient(ExchangeGateway):
         return result
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[Candle]:
+        cache_key = (symbol, interval, limit)
+        cache_ttl = {"15m": 10 * 60, "1h": 45 * 60, "4h": 3 * 60 * 60}.get(interval, 60)
+        cached = self._kline_cache.get(cache_key)
+        now_monotonic = time.monotonic()
+        if cached is not None and now_monotonic - cached[0] < cache_ttl:
+            return [item.model_copy(deep=True) for item in cached[1]]
         rows = await self._request(
             "GET", "/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit}
         )
         now = datetime.now(UTC)
-        return [
+        candles = [
             Candle(
                 open_time=datetime.fromtimestamp(row[0] / 1000, tz=UTC),
                 close_time=datetime.fromtimestamp(row[6] / 1000, tz=UTC),
@@ -605,6 +721,11 @@ class BinanceUSDMarketClient(ExchangeGateway):
             for row in rows
             if datetime.fromtimestamp(row[6] / 1000, tz=UTC) <= now
         ]
+        self._kline_cache[cache_key] = (
+            time.monotonic(),
+            [item.model_copy(deep=True) for item in candles],
+        )
+        return candles
 
     async def get_historical_klines(
         self, symbol: str, interval: str, start_ms: int, end_ms: int
@@ -784,6 +905,13 @@ class BinanceUSDMarketClient(ExchangeGateway):
         return maximum
 
     async def best_entry_price(self, symbol: str, side: str) -> Decimal:
+        cached = (
+            self._market_cache.book_snapshot(symbol)
+            if self._market_cache is not None
+            else None
+        )
+        if cached is not None:
+            return Decimal(cached["best_ask"] if side == "BUY" else cached["best_bid"])
         body = await self._request("GET", "/fapi/v1/ticker/bookTicker", {"symbol": symbol})
         # Use the marketable side of the spread.  A BUY at the best ask and a
         # SELL at the best bid can fill immediately while remaining a bounded
@@ -795,6 +923,13 @@ class BinanceUSDMarketClient(ExchangeGateway):
         return Decimal(body["askPrice"] if side == "BUY" else body["bidPrice"])
 
     async def get_mark_price(self, symbol: str) -> Decimal:
+        cached = (
+            self._market_cache.mark_snapshot(symbol)
+            if self._market_cache is not None
+            else None
+        )
+        if cached is not None:
+            return Decimal(cached["mark_price"])
         body = await self._request("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
         return Decimal(body["markPrice"])
 
@@ -883,8 +1018,8 @@ class BinanceUSDMarketClient(ExchangeGateway):
         )
         tp2_price = self._round_price(intent.tp2_price, filters.tick_size, target_rounding)
         self._validate_take_profit_geometry(intent, tp1_price, tp2_price)
-        q1 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
-        q2 = self._round_quantity(filled_quantity * Decimal("0.4"), filters.step_size)
+        q1 = self._round_quantity(filled_quantity * TP1_FRACTION, filters.step_size)
+        q2 = self._round_quantity(filled_quantity * TP2_FRACTION, filters.step_size)
         close_side = "SELL" if intent.side == PositionSide.LONG else "BUY"
         stop_suffix = hashlib.sha256(
             f"{intent.intent_id}:{self._fmt(stop_price)}".encode()

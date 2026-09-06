@@ -49,6 +49,10 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "portfolio_strategy_enabled",
         "portfolio_rebalance_deadband_fraction",
         "portfolio_rebalance_cooldown_minutes",
+        "factor_policy_enabled",
+        "factor_rank_weight",
+        "factor_min_risk_multiplier",
+        "factor_promotion_windows",
         "hft_enabled",
         "hft_dry_run",
         "hft_symbols",
@@ -126,7 +130,7 @@ class Settings(BaseSettings):
     # misleading "model interrupted" state.
     model_timeout_seconds: float = 120.0
     model_prompt_version: str = "signal-v1"
-    portfolio_prompt_version: str = "portfolio-v1.3"
+    portfolio_prompt_version: str = "portfolio-v1.4-factor-policy"
     strategy_profile: Literal[
         "conservative", "balanced", "trend_following", "scalping"
     ] = "trend_following"
@@ -188,6 +192,10 @@ class Settings(BaseSettings):
     portfolio_strategy_enabled: bool = True
     portfolio_rebalance_deadband_fraction: float = Field(default=0.10, ge=0, le=1)
     portfolio_rebalance_cooldown_minutes: int = Field(default=30, ge=0, le=1_440)
+    factor_policy_enabled: bool = True
+    factor_rank_weight: float = Field(default=0.20, ge=0, le=1)
+    factor_min_risk_multiplier: float = Field(default=0.75, gt=0, le=1)
+    factor_promotion_windows: int = Field(default=30, ge=1, le=365)
     hft_enabled: bool = False
     hft_dry_run: bool = True
     hft_symbols: Annotated[list[str], NoDecode] = Field(
@@ -226,6 +234,7 @@ class Settings(BaseSettings):
                 "manual_exit_levels_enabled": False,
                 "model_primary_portfolio_enabled": False,
                 "strong_trend_entry_override_enabled": False,
+                "factor_policy_enabled": False,
             }
             if live
             else {
@@ -239,6 +248,7 @@ class Settings(BaseSettings):
                 "manual_exit_levels_enabled": True,
                 "model_primary_portfolio_enabled": True,
                 "strong_trend_entry_override_enabled": True,
+                "factor_policy_enabled": True,
             }
         )
         for key, default in defaults.items():
@@ -262,6 +272,8 @@ class Settings(BaseSettings):
             elif key == "model_primary_portfolio_enabled":
                 data[key] = False
             elif key == "strong_trend_entry_override_enabled":
+                data[key] = False
+            elif key == "factor_policy_enabled":
                 data[key] = False
             elif key in {"single_trade_risk_pct", "portfolio_risk_pct"}:
                 data[key] = min(float(current), float(default))
@@ -300,6 +312,8 @@ class Settings(BaseSettings):
                 raise ValueError("model-primary portfolio mode is limited to Binance testnet")
             if self.strong_trend_entry_override_enabled:
                 raise ValueError("strong trend entry override is limited to Binance testnet")
+            if self.factor_policy_enabled:
+                raise ValueError("factor policy execution is limited to Binance testnet")
         if self.app_env == "production":
             allowed_rest_hosts = (
                 {"fapi.binance.com"}

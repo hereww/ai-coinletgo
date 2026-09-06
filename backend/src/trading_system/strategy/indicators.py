@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import mean, pstdev
 from typing import Literal
 
@@ -209,11 +209,30 @@ def volume_zscore(candles: list[Candle], period: int = 20) -> Decimal:
 
 
 def pearson_correlation(left: list[Decimal], right: list[Decimal]) -> Decimal:
+    """Return a conservative correlation value for non-risk callers.
+
+    Risk checks use :func:`strict_pearson_correlation` so missing or unusable
+    data cannot be mistaken for a real low-correlation observation.
+    """
+
+    return strict_pearson_correlation(left, right) or Decimal("1")
+
+
+def strict_pearson_correlation(
+    left: list[Decimal], right: list[Decimal]
+) -> Decimal | None:
+    """Return correlation only when the input is sufficient for risk checks."""
+
     size = min(len(left), len(right))
     if size < 20:
-        return Decimal("1")
-    x = [float(value) for value in left[-size:]]
-    y = [float(value) for value in right[-size:]]
+        return None
+    try:
+        x = [float(value) for value in left[-size:]]
+        y = [float(value) for value in right[-size:]]
+    except (TypeError, ValueError):
+        return None
+    if not all(isfinite(value) for value in x + y):
+        return None
     x_mean = mean(x)
     y_mean = mean(y)
     numerator = sum((a - x_mean) * (b - y_mean) for a, b in zip(x, y, strict=True))
@@ -221,5 +240,5 @@ def pearson_correlation(left: list[Decimal], right: list[Decimal]) -> Decimal:
     y_var = sum((b - y_mean) ** 2 for b in y)
     denominator = sqrt(x_var * y_var)
     if denominator == 0:
-        return Decimal("1")
+        return None
     return Decimal(str(max(-1.0, min(1.0, numerator / denominator))))

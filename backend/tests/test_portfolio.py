@@ -137,7 +137,7 @@ def test_compiler_allows_strong_uptrend_long_without_15m_trigger() -> None:
     assert "strong_trend_entry_override" in plan.actions[0].reasons
 
 
-def test_model_primary_accepts_opportunity_without_indicator_gates() -> None:
+def test_model_primary_still_rejects_low_net_reward_risk() -> None:
     limits = context().limits.model_copy(
         update={"model_primary_portfolio_enabled": True, "min_net_reward_risk": 3}
     )
@@ -164,12 +164,12 @@ def test_model_primary_accepts_opportunity_without_indicator_gates() -> None:
         limits=limits,
         mode=SystemMode.TESTNET,
     )
-    assert plan.status == PortfolioPlanStatus.APPROVED
-    assert plan.actions[0].action == PortfolioPlanActionType.OPEN
-    assert "model_primary_opportunity_accepted" in plan.actions[0].reasons
+    assert plan.status == PortfolioPlanStatus.REJECTED
+    assert plan.actions[0].action == PortfolioPlanActionType.REJECTED
+    assert "net_reward_risk_below_minimum" in plan.actions[0].reasons
 
 
-def test_model_primary_does_not_block_model_add_with_cooldown() -> None:
+def test_model_primary_cannot_bypass_rebalance_cooldown() -> None:
     limits = context().limits.model_copy(update={"model_primary_portfolio_enabled": True})
     current = position(
         symbol="BTCUSDT",
@@ -198,11 +198,11 @@ def test_model_primary_does_not_block_model_add_with_cooldown() -> None:
         last_rebalance_at=datetime.now(UTC),
         cooldown_minutes=30,
     )
-    assert plan.actions[0].action == PortfolioPlanActionType.ADD
-    assert all("rebalance_cooldown_active" not in item.reasons for item in plan.actions)
+    assert plan.actions[0].action == PortfolioPlanActionType.REJECTED
+    assert "rebalance_cooldown_active" in plan.actions[0].reasons
 
 
-def test_compiler_strong_uptrend_bypasses_opportunity_filters() -> None:
+def test_compiler_strong_uptrend_cannot_bypass_concentration_limits() -> None:
     limits = context().limits.model_copy(
         update={
             "strong_trend_entry_override_enabled": True,
@@ -232,7 +232,7 @@ def test_compiler_strong_uptrend_bypasses_opportunity_filters() -> None:
     aggressive_btc = allocation(
         confidence=Decimal("0.1"),
         stop_price=Decimal("99"),
-        target_price=Decimal("100.2"),
+        target_price=Decimal("106"),
     )
     now = datetime.now(UTC)
 
@@ -254,8 +254,8 @@ def test_compiler_strong_uptrend_bypasses_opportunity_filters() -> None:
     )
 
     btc_action = next(item for item in plan.actions if item.symbol == "BTCUSDT")
-    assert btc_action.action == PortfolioPlanActionType.OPEN
-    assert "strong_trend_entry_override" in btc_action.reasons
+    assert btc_action.action == PortfolioPlanActionType.REJECTED
+    assert "same_direction_limit_reached" in btc_action.reasons
 
 
 def test_compiler_strong_uptrend_keeps_available_balance_guard() -> None:
@@ -347,9 +347,41 @@ def test_compiler_sizes_new_position_from_worst_permitted_fill_edge(
     action = plan.actions[0]
     worst_fill_risk = action.target_quantity * abs(risk_entry - stop_price)
     assert action.action == PortfolioPlanActionType.OPEN
-    assert action.target_quantity == Decimal("3.7")
+    assert action.target_quantity == Decimal("1.2")
     assert action.target_risk_usdt == worst_fill_risk
-    assert worst_fill_risk <= plan.risk_cap_usdt
+    assert worst_fill_risk <= Decimal("2.5")
+
+
+def test_existing_position_over_single_trade_cap_cannot_add_after_tightening() -> None:
+    current = position(
+        symbol="BTCUSDT",
+        quantity=Decimal("3"),
+        initial_quantity=Decimal("3"),
+        entry_price=Decimal("100"),
+        mark_price=Decimal("100"),
+        stop_price=Decimal("98"),
+        original_stop_price=Decimal("98"),
+        initial_risk_usdt=Decimal("6"),
+    )
+    plan = PortfolioCompiler().compile(
+        decision(
+            allocation(
+                allocation_fraction=Decimal("1"),
+                stop_price=Decimal("99.5"),
+                target_price=Decimal("106"),
+            )
+        ),
+        snapshots={"BTCUSDT": snapshot()},
+        account=context().account,
+        positions=[current],
+        filters=filters(),
+        limits=context().limits,
+        mode=SystemMode.TESTNET,
+    )
+
+    assert plan.actions[0].action == PortfolioPlanActionType.TIGHTEN_STOP
+    assert plan.actions[0].target_quantity == current.quantity
+    assert "single_trade_risk_over_cap" in plan.actions[0].reasons
 
 
 def test_compiler_rejects_target_when_available_balance_is_insufficient() -> None:

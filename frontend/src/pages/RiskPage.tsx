@@ -183,7 +183,7 @@ export default function RiskPage() {
           <NumberField label="高波动风险系数" value={form.elevated_volatility_risk_multiplier ?? 0.75} step={0.05} min={0.05} max={1} onChange={(value) => update('elevated_volatility_risk_multiplier', value)} />
           <NumberField label="极端波动风险系数" value={form.high_volatility_risk_multiplier ?? 0.5} step={0.05} min={0.05} max={1} onChange={(value) => update('high_volatility_risk_multiplier', value)} />
         </div>
-        <p className="setup-note">模型主导开启后，模型负责方向、机会和目标仓位；置信度、ADX、趋势、15 分钟触发、最低盈亏比、相关性和调仓冷却不再否决模型意图。仍强制执行风控止盈止损、组合风险与保证金上限、总仓位数、可用余额、交易所精度、系统模式和熔断。</p>
+        <p className="setup-note">模型主导开启后，模型负责方向、机会和目标仓位；置信度、ADX、趋势和 15 分钟触发作为判断证据。最低净盈亏比、单笔与组合风险、同向仓位、相关性、调仓冷却、保证金、余额、交易所精度、系统模式和熔断始终由本地硬风控执行。</p>
         <p className="setup-note">启用风控接管止盈止损后，新开仓按 ATR 自动生成止损/最终止盈（默认 1.8 / 5.0 ATR），覆盖模型绝对价；已有仓位沿用已生效的交易所保护单，不会被模型放宽或频繁改写。</p>
         <p className="setup-note">扫描周期可设为 5–120 分钟，并按固定时间边界运行；5 分钟约为每天 288 次分析。保存后 Worker 会在等待期间自动重新计算下一次扫描时间。</p>
 
@@ -210,6 +210,15 @@ export default function RiskPage() {
         </div>
         <p className="setup-note">Portfolio-v1 让 AI 输出组合风险预算和各币风险份额；数量、杠杆和订单细节仍由确定性风控计算。启用后只允许测试网执行，模型无效时不会产生调仓订单。</p>
 
+        <div className="section-head"><h2>因子策略控制</h2><ShieldCheck size={18} /></div>
+        <div className="settings-grid">
+          <label className="checkbox-row"><input type="checkbox" checked={form.factor_policy_enabled ?? false} onChange={(event) => update('factor_policy_enabled', event.target.checked)} /><span>启用 ACTIVE 因子排序与风险倍率（测试网）</span></label>
+          <NumberField label="因子排名权重 (%)" value={(form.factor_rank_weight ?? 0.2) * 100} step={1} min={0} max={100} onChange={(value) => update('factor_rank_weight', value / 100)} />
+          <NumberField label="因子最低风险倍率" value={form.factor_min_risk_multiplier ?? 0.75} step={0.05} min={0.05} max={1} onChange={(value) => update('factor_min_risk_multiplier', value)} />
+          <NumberField label="自动升版成熟窗口" value={form.factor_promotion_windows ?? 30} step={1} min={1} max={365} onChange={(value) => update('factor_promotion_windows', value)} />
+        </div>
+        <p className="setup-note">关闭开关会立即让后续周期回退原排序和 1.0 因子倍率，不影响研究与影子窗口记录。因子不决定交易方向，也不直接否决入场。</p>
+
         <div className="section-head"><h2>HFT 盘口 shadow</h2><ShieldCheck size={18} /></div>
         <div className="settings-grid">
           <label className="checkbox-row"><input type="checkbox" checked={form.hft_enabled ?? false} onChange={(event) => update('hft_enabled', event.target.checked)} /><span>启用 HFT 盘口策略（仅测试网）</span></label>
@@ -235,7 +244,7 @@ export default function RiskPage() {
 
       <aside className="surface immutable-limits">
         <div className="section-head"><h2>不可放宽规则</h2></div>
-        <dl><div><dt>杠杆</dt><dd>1–30×</dd></div><div><dt>扫描周期</dt><dd>5 / 15 / 30 / 60 分钟</dd></div><div><dt>风险与止损数值</dt><dd>必须大于 0</dd></div><div><dt>止损区间</dt><dd>最小值 ≤ 最大值</dd></div><div><dt>手动止盈止损</dt><dd>仅测试网新开仓</dd></div><div><dt>强趋势放行</dt><dd>仅测试网多头机会策略</dd></div><div><dt>置信度 / 相关性</dt><dd>0–1</dd></div><div><dt>HFT 执行</dt><dd>仅测试网 dry-run</dd></div><div><dt>补仓与马丁</dt><dd>禁止</dd></div></dl>
+        <dl><div><dt>杠杆</dt><dd>1–30×</dd></div><div><dt>扫描周期</dt><dd>5 / 15 / 30 / 60 分钟</dd></div><div><dt>风险与止损数值</dt><dd>必须大于 0</dd></div><div><dt>止损区间</dt><dd>最小值 ≤ 最大值</dd></div><div><dt>手动止盈止损</dt><dd>仅测试网新开仓</dd></div><div><dt>强趋势放行</dt><dd>不放宽任何组合硬限制</dd></div><div><dt>净盈亏比 / 相关性</dt><dd>OPEN 与 ADD 强制检查</dd></div><div><dt>因子执行</dt><dd>仅测试网 ACTIVE 版本</dd></div><div><dt>HFT 执行</dt><dd>仅测试网 dry-run</dd></div><div><dt>补仓与马丁</dt><dd>禁止</dd></div></dl>
         <p className="setup-note">AI 策略模板（趋势跟随、平衡、保守、短线）在“设置 → AI 中转 / Responses API”中选择。</p>
       </aside>
     </section>

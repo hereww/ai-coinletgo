@@ -27,6 +27,12 @@ docker compose -f docker-compose.server.yml up -d --build api worker
 代理模式只支持 HTTP/HTTPS 代理地址，不会自动读取宿主机的 `HTTP_PROXY` 环境变量；未启用时
 客户端强制直连，避免部署环境的隐式代理改变交易链路。
 
+API 和 Worker 启动后会通过 Binance 公共 WebSocket 接收 ticker、bookTicker 和 mark price，
+用于实时行情、选币和下单前报价；账户、订单、过滤器、OI、历史 K 线和回放数据仍按需使用
+REST。历史 K 线、盘口深度和交易所元数据带有进程内缓存，避免每个扫描周期重复下载整套行情。
+如果 Binance 已返回 `IP banned until ...`，请先停止会继续重试的旧容器，等待 Binance 返回的
+绝对时间到期后再用包含本次修复的镜像重启；WebSocket 不会解除已经生效的 REST IP 封禁。
+
 ## 本地开发
 
 需要 Python 3.12、Node.js 20+、PostgreSQL 和 Redis。也可以直接使用 Docker Compose。

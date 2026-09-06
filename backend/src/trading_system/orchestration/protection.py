@@ -16,6 +16,11 @@ from trading_system.exchange.base import ExchangeError
 from trading_system.exchange.binance import BinanceUSDMarketClient
 from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.repository import Repository
+from trading_system.strategy.exit_policy import (
+    TP1_FRACTION,
+    breakeven_stop,
+    trailing_stop,
+)
 
 logger = logging.getLogger("trading-worker.protection")
 
@@ -232,12 +237,17 @@ class PositionProtectionMonitor:
             self.exchange, "get_filters"
         ):
             incomplete_take_profits = []
+        repair_snapshots = (
+            await self._latest_snapshots()
+            if incomplete_take_profits and self.settings.manual_exit_levels_enabled
+            else {}
+        )
         protection_repaired = False
         for position in incomplete_take_profits:
             try:
                 filters = await self.exchange.get_filters(position.symbol)
                 tranche = self._round_down(
-                    position.quantity * Decimal("0.4"), filters.step_size
+                    position.quantity * TP1_FRACTION, filters.step_size
                 )
                 if tranche < filters.min_quantity:
                     # A TP tranche below Binance's minimum cannot be placed;
@@ -245,7 +255,14 @@ class PositionProtectionMonitor:
                     # remove the residual quantity.
                     continue
                 orders = await self.exchange.upsert_protection(
-                    self._repair_intent(position),
+                    self._repair_intent(
+                        position,
+                        snapshot=repair_snapshots.get(position.symbol),
+                        manual_exit_levels_enabled=self.settings.manual_exit_levels_enabled,
+                        manual_take_profit_atr=Decimal(
+                            str(self.settings.manual_take_profit_atr)
+                        ),
+                    ),
                     position.quantity,
                     position.entry_price,
                 )
@@ -391,17 +408,34 @@ class PositionProtectionMonitor:
         return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
 
     @staticmethod
-    def _repair_intent(position: PositionState) -> ExecutionIntent:
+    def _repair_intent(
+        position: PositionState,
+        *,
+        snapshot: MarketSnapshot | None = None,
+        manual_exit_levels_enabled: bool = False,
+        manual_take_profit_atr: Decimal = Decimal("5"),
+    ) -> ExecutionIntent:
         risk = abs(position.entry_price - position.stop_price)
         if risk <= 0:
             raise ExchangeError("cannot repair take-profit protection without stop distance")
+        manual_target_distance: Decimal | None = None
+        if (
+            manual_exit_levels_enabled
+            and snapshot is not None
+            and snapshot.atr_15m > 0
+        ):
+            manual_target_distance = snapshot.atr_15m * manual_take_profit_atr
         if position.side == PositionSide.LONG:
             tp1 = (
                 None
                 if position.tp1_completed
                 else position.tp1_price or position.entry_price + risk
             )
-            default_tp2 = position.entry_price + risk * Decimal("2")
+            default_tp2 = (
+                position.entry_price + manual_target_distance
+                if manual_target_distance is not None
+                else position.entry_price + risk * Decimal("2")
+            )
             tp2 = position.tp2_price or (
                 max(default_tp2, tp1 + risk) if tp1 is not None else default_tp2
             )
@@ -411,7 +445,11 @@ class PositionProtectionMonitor:
                 if position.tp1_completed
                 else position.tp1_price or position.entry_price - risk
             )
-            default_tp2 = position.entry_price - risk * Decimal("2")
+            default_tp2 = (
+                position.entry_price - manual_target_distance
+                if manual_target_distance is not None
+                else position.entry_price - risk * Decimal("2")
+            )
             tp2 = position.tp2_price or (
                 min(default_tp2, tp1 - risk) if tp1 is not None else default_tp2
             )
@@ -506,23 +544,21 @@ class PositionProtectionMonitor:
     def _managed_stop(position: PositionState, snapshot: MarketSnapshot | None) -> Decimal | None:
         if position.current_r < Decimal("1"):
             return None
-        cost_buffer = position.entry_price * Decimal("0.0015")
+        candidate = breakeven_stop(
+            position.entry_price, position.side, Decimal("0.0015")
+        )
+        if position.current_r >= Decimal("2") and snapshot is not None:
+            candidate = trailing_stop(
+                current_stop=candidate,
+                side=position.side,
+                highest=position.mark_price,
+                lowest=position.mark_price,
+                atr=snapshot.atr_15m,
+                atr_multiple=Decimal("1.5"),
+            )
         if position.side == PositionSide.LONG:
-            candidate = position.entry_price + cost_buffer
-            if position.current_r >= Decimal("2") and snapshot is not None:
-                candidate = max(
-                    candidate,
-                    position.mark_price - snapshot.atr_15m * Decimal("1.5"),
-                )
             if position.stop_price < candidate < position.mark_price:
                 return candidate
-        else:
-            candidate = position.entry_price - cost_buffer
-            if position.current_r >= Decimal("2") and snapshot is not None:
-                candidate = min(
-                    candidate,
-                    position.mark_price + snapshot.atr_15m * Decimal("1.5"),
-                )
-            if position.stop_price > candidate > position.mark_price:
-                return candidate
+        elif position.stop_price > candidate > position.mark_price:
+            return candidate
         return None

@@ -52,6 +52,8 @@ class SystemController:
         self.started_at = datetime.now(UTC)
         self._health_cache: tuple[float, HealthReport] | None = None
         self._health_lock = asyncio.Lock()
+        self._exchange_health_cache: tuple[float, HealthComponent] | None = None
+        self._exchange_health_lock = asyncio.Lock()
         # The dashboard is a read-only view but it is polled by the browser.
         # Keep a short shared snapshot so every open tab does not multiply
         # signed Binance account/position requests (which can otherwise
@@ -178,7 +180,7 @@ class SystemController:
         if target == "binance_testnet":
             if self.settings.binance_environment != "testnet":
                 raise ValueError("Binance runtime is not configured for testnet")
-            component = await self._exchange_health()
+            component = await self._exchange_health(force=True)
         elif target == "model_relay":
             component = await self._model_health(deep=True)
         else:
@@ -786,21 +788,32 @@ class SystemController:
             detail=detail,
         )
 
-    async def _exchange_health(self) -> HealthComponent:
-        started = time.perf_counter()
-        healthy, detail = await self.exchange.health_check()
-        if healthy:
-            state = HealthState.HEALTHY
-        elif not self.exchange.configured:
-            state = HealthState.NOT_CONFIGURED
-        else:
-            state = HealthState.FAILED
-        return HealthComponent(
-            name="binance",
-            state=state,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            detail=detail,
-        )
+    async def _exchange_health(self, *, force: bool = False) -> HealthComponent:
+        now = time.monotonic()
+        cached = self._exchange_health_cache
+        if not force and cached is not None and now - cached[0] < 120:
+            return cached[1]
+        async with self._exchange_health_lock:
+            now = time.monotonic()
+            cached = self._exchange_health_cache
+            if not force and cached is not None and now - cached[0] < 120:
+                return cached[1]
+            started = time.perf_counter()
+            healthy, detail = await self.exchange.health_check()
+            if healthy:
+                state = HealthState.HEALTHY
+            elif not self.exchange.configured:
+                state = HealthState.NOT_CONFIGURED
+            else:
+                state = HealthState.FAILED
+            component = HealthComponent(
+                name="binance",
+                state=state,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                detail=detail,
+            )
+            self._exchange_health_cache = (time.monotonic(), component)
+            return component
 
     async def _model_health(self, *, deep: bool = False) -> HealthComponent:
         healthy, detail = await self.model.health_check(deep=deep)

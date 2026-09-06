@@ -62,6 +62,24 @@ def test_entry_and_final_close_fees_are_counted_once() -> None:
     assert open_position.remaining == 0
 
 
+def test_manual_atr_exit_levels_use_shared_40_40_20_geometry() -> None:
+    engine = BacktestEngine()
+    config = BacktestConfig(
+        slippage_rate=Decimal("0"),
+        fee_rate=Decimal("0"),
+        manual_exit_levels_enabled=True,
+        manual_stop_atr=Decimal("1.8"),
+        manual_take_profit_atr=Decimal("5"),
+    )
+    open_position = engine._open(
+        PositionSide.LONG, Decimal("100"), Decimal("1"), Decimal("1000"), config
+    )
+    assert open_position.entry == Decimal("100")
+    assert open_position.stop == Decimal("98.2")
+    assert open_position.tp1 == Decimal("101.8")
+    assert open_position.tp2 == Decimal("105")
+
+
 def test_tp1_tp2_and_trailing_manage_remaining_twenty_percent() -> None:
     engine = BacktestEngine()
     config = BacktestConfig(slippage_rate=Decimal("0"), fee_rate=Decimal("0"))
@@ -143,6 +161,24 @@ def flat_candles(count: int = 2883) -> list[Candle]:
     ]
 
 
+def drifting_candles(step: str, count: int = 2883) -> list[Candle]:
+    start = datetime(2024, 12, 1, tzinfo=UTC)
+    drift = Decimal(step)
+    return [
+        Candle(
+            open_time=start + timedelta(minutes=index * 15),
+            close_time=start + timedelta(minutes=(index + 1) * 15)
+            - timedelta(milliseconds=1),
+            open=Decimal("100") + drift * index,
+            high=Decimal("101.25") + drift * index,
+            low=Decimal("98.75") + drift * index,
+            close=Decimal("100") + drift * index,
+            volume=Decimal("1000"),
+        )
+        for index in range(count)
+    ]
+
+
 def replay_filters(**updates: str) -> ExchangeFilters:
     values = {
         "tick_size": Decimal("0.1"),
@@ -170,8 +206,9 @@ def run_portfolio(
     *,
     config: BacktestConfig | None = None,
     exchange_filters: ExchangeFilters | None = None,
+    rows: list[Candle] | None = None,
 ):
-    rows = flat_candles()
+    rows = rows or flat_candles()
     return ForcedPortfolioEngine().run_portfolio(
         {symbol: rows for symbol in symbols},
         {symbol: exchange_filters or replay_filters() for symbol in symbols},
@@ -181,7 +218,9 @@ def run_portfolio(
 
 
 def test_portfolio_replay_rejects_highly_correlated_second_symbol() -> None:
-    result = run_portfolio(["AAAUSDT", "BBBUSDT"])
+    result = run_portfolio(
+        ["AAAUSDT", "BBBUSDT"], rows=drifting_candles("0.01")
+    )
     assert result.trades == 1
     assert result.signal_rejections["correlated_with_AAAUSDT"] >= 1
     assert result.symbol_results["AAAUSDT"]["trades"] == 1
@@ -193,12 +232,14 @@ def test_portfolio_replay_enforces_shared_risk_and_direction_limits() -> None:
         config=portfolio_config(
             portfolio_risk_pct=Decimal("0.0025"), correlation_limit=Decimal("1")
         ),
+        rows=drifting_candles("0.01"),
     )
     assert risk_limited.signal_rejections["portfolio_risk_capacity_exhausted"] >= 1
 
     direction_limited = run_portfolio(
         ["AAAUSDT", "BBBUSDT"],
         config=portfolio_config(max_same_direction=1, correlation_limit=Decimal("1")),
+        rows=drifting_candles("0.01"),
     )
     assert direction_limited.signal_rejections["same_direction_limit_reached"] >= 1
 
@@ -211,6 +252,56 @@ def test_portfolio_replay_applies_exchange_quantity_filters() -> None:
     assert result.signal_rejections["quantity_below_exchange_minimum"] >= 1
     filters = result.symbol_results["AAAUSDT"]["exchange_filters"]
     assert filters["min_quantity"] == "10"
+
+
+def test_portfolio_replay_applies_point_in_time_factor_risk_scaling() -> None:
+    markets = {
+        "AAAUSDT": drifting_candles("0.01"),
+        "BBBUSDT": drifting_candles("0.002"),
+        "CCCUSDT": drifting_candles("-0.005"),
+    }
+    filters = {symbol: replay_filters(step_size="0.01") for symbol in markets}
+    policy: dict[str, object] = {
+        "research_run_id": "0d5f81b1-4a64-4ac9-8d72-e1c4a2f70162",
+        "factors": [
+            {
+                "key": "momentum_5d",
+                "label": "5日动量",
+                "direction": "POSITIVE",
+            }
+        ],
+        "parameters": {
+            "interval": "1h",
+            "rebalance_bars": 24,
+            "winsorize_quantile": "0.05",
+        },
+    }
+    config = portfolio_config(
+        candidate_count=3,
+        max_positions=3,
+        max_same_direction=3,
+        correlation_limit=Decimal("1"),
+    )
+    evaluation_start = markets["AAAUSDT"][-3].open_time
+    baseline = ForcedPortfolioEngine().run_portfolio(
+        markets,
+        filters,
+        config,
+        evaluation_start=evaluation_start,
+        factor_policy=policy,
+        factor_enabled=False,
+    )
+    factored = ForcedPortfolioEngine().run_portfolio(
+        markets,
+        filters,
+        config,
+        evaluation_start=evaluation_start,
+        factor_policy=policy,
+        factor_enabled=True,
+    )
+    assert baseline.factor_risk_clippings == 0
+    assert factored.factor_fallbacks == 0
+    assert factored.factor_risk_clippings >= 1
 
 
 def test_portfolio_funding_cost_respects_position_direction() -> None:

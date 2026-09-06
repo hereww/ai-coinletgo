@@ -28,6 +28,44 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class FactorOverlay(BaseModel):
+    """Frozen point-in-time factor contribution for one market snapshot."""
+
+    research_run_id: str
+    policy_status: Literal["ACTIVE", "SHADOW", "FALLBACK", "DISABLED"]
+    baseline_score: Decimal
+    baseline_percentile: Decimal = Field(ge=0, le=1)
+    factor_score: Decimal
+    factor_percentile: Decimal = Field(ge=0, le=1)
+    combined_score: Decimal
+    factor_coverage: Decimal = Field(ge=0, le=1)
+    contributions: dict[str, Decimal] = Field(default_factory=dict)
+    risk_multiplier: Decimal = Field(gt=0, le=1)
+    baseline_rank: int = Field(ge=1)
+    factor_rank: int = Field(ge=1)
+    combined_rank: int = Field(ge=1)
+    rank_change: int
+    fallback_reason: str | None = None
+
+
+class FactorPolicySnapshot(BaseModel):
+    """Immutable factor policy state attached to a decision and compiled plan."""
+
+    enabled: bool
+    environment: Literal["testnet", "live"]
+    active_research_run_id: str | None = None
+    shadow_research_run_id: str | None = None
+    applied_research_run_id: str | None = None
+    applied_status: Literal["ACTIVE", "SHADOW", "FALLBACK", "DISABLED"] = "DISABLED"
+    rank_weight: Decimal = Field(ge=0, le=1)
+    minimum_risk_multiplier: Decimal = Field(gt=0, le=1)
+    promotion_windows: int = Field(ge=1)
+    matured_windows: int = Field(default=0, ge=0)
+    promotion_metrics: dict[str, object] = Field(default_factory=dict)
+    failure_reasons: list[str] = Field(default_factory=list)
+    captured_at: datetime = Field(default_factory=utc_now)
+
+
 class Candle(BaseModel):
     open_time: datetime
     close_time: datetime
@@ -69,10 +107,21 @@ class MarketSnapshot(BaseModel):
     # Point-in-time factor values are kept in memory for the shadow ranking
     # only. They are excluded from model inputs and ordinary market snapshots.
     factor_values: dict[str, Decimal] = Field(default_factory=dict, exclude=True)
+    factor_overlay: FactorOverlay | None = None
 
     @property
     def mid_price(self) -> Decimal:
         return (self.best_bid + self.best_ask) / Decimal("2")
+
+    @property
+    def effective_risk_multiplier(self) -> Decimal:
+        factor_multiplier = (
+            self.factor_overlay.risk_multiplier
+            if self.factor_overlay is not None
+            and self.factor_overlay.policy_status == "ACTIVE"
+            else Decimal("1")
+        )
+        return self.volatility_risk_multiplier * min(factor_multiplier, Decimal("1"))
 
 
 class UniverseSymbol(BaseModel):
@@ -430,6 +479,7 @@ class PortfolioDecision(BaseModel):
     summary: str = Field(max_length=500)
     model_name: str = Field(default="", max_length=120)
     prompt_version: str = Field(default="", max_length=80)
+    factor_policy_snapshot: FactorPolicySnapshot | None = None
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime
 
@@ -482,6 +532,7 @@ class PortfolioPlan(BaseModel):
     approved_risk_usdt: NonNegativeDecimal = Decimal("0")
     actions: list[PortfolioPlanAction] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
+    factor_policy_snapshot: FactorPolicySnapshot | None = None
     compiled_at: datetime = Field(default_factory=utc_now)
 
 

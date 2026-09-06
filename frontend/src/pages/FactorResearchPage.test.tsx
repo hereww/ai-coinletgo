@@ -8,6 +8,7 @@ const apiMock = vi.hoisted(() => ({
   researchFactors: vi.fn(),
   factorResearchRuns: vi.fn(),
   factorShadowRankings: vi.fn(),
+  factorPolicyStatus: vi.fn(),
 }))
 vi.mock('../api/client', () => ({ api: apiMock }))
 
@@ -87,6 +88,22 @@ beforeEach(() => {
   apiMock.researchFactors.mockReset().mockResolvedValue(submission)
   apiMock.factorResearchRuns.mockReset().mockResolvedValue([])
   apiMock.factorShadowRankings.mockReset().mockResolvedValue([])
+  apiMock.factorPolicyStatus.mockReset().mockResolvedValue({
+    enabled: true,
+    environment: 'testnet',
+    rank_weight: 0.2,
+    minimum_risk_multiplier: 0.75,
+    promotion_windows: 30,
+    active: null,
+    shadow: null,
+    promotion: {
+      matured_windows: 0, required_windows: 30, progress: '0', oriented_mean_ic: null,
+      shadow_net_return: '0', baseline_net_return: '0', shadow_max_drawdown: '0',
+      baseline_max_drawdown: '0', candidate_turnover: '0', gates: {},
+      failure_reasons: ['minimum_windows'], eligible_for_promotion: false,
+    },
+    windows: [],
+  })
 })
 
 afterEach(cleanup)

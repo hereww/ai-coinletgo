@@ -27,7 +27,10 @@ def test_sizes_from_stop_distance_and_rounds_down() -> None:
     assert decision.quantity == Decimal("2.4")
     assert decision.risk_amount_usdt == Decimal("2.40")
     assert decision.leverage == 3
-    assert engine.build_execution_intent(trade_signal, decision).intent_id == trade_signal.signal_id
+    intent = engine.build_execution_intent(trade_signal, decision)
+    assert intent.intent_id == trade_signal.signal_id
+    assert intent.tp1_price == Decimal("101")
+    assert intent.tp2_price == Decimal("103")
 
 
 def test_configured_leverage_can_reach_30_without_increasing_risk_amount() -> None:
@@ -56,10 +59,10 @@ def test_strong_uptrend_override_allows_long_without_15m_trigger() -> None:
 
 def test_model_primary_accepts_low_confidence_ranging_signal() -> None:
     limits = context().limits.model_copy(
-        update={"model_primary_portfolio_enabled": True, "min_net_reward_risk": 3}
+        update={"model_primary_portfolio_enabled": True}
     )
     result = RiskEngine().evaluate(
-        signal(confidence=Decimal("0.1"), target_price=Decimal("100.2")),
+        signal(confidence=Decimal("0.1"), target_price=Decimal("106")),
         snapshot(
             market_regime="RANGING",
             trend_1h=-1,
@@ -85,7 +88,7 @@ def test_model_primary_keeps_hard_stop_and_margin_guards() -> None:
     assert "stop_too_close" in result.reasons
 
 
-def test_strong_uptrend_override_bypasses_opportunity_filters() -> None:
+def test_strong_uptrend_override_cannot_bypass_same_direction_limit() -> None:
     limits = context().limits.model_copy(
         update={
             "strong_trend_entry_override_enabled": True,
@@ -96,7 +99,7 @@ def test_strong_uptrend_override_bypasses_opportunity_filters() -> None:
     )
     existing = position(symbol="ETHUSDT", side=PositionSide.LONG)
     decision = RiskEngine().evaluate(
-        signal(confidence=Decimal("0.1"), target_price=Decimal("100.2")),
+        signal(confidence=Decimal("0.1"), target_price=Decimal("106")),
         snapshot(breakout_15m=1, pullback_15m=0),
         context(
             limits=limits,
@@ -105,8 +108,8 @@ def test_strong_uptrend_override_bypasses_opportunity_filters() -> None:
         ),
     )
 
-    assert decision.status == DecisionStatus.APPROVED
-    assert "strong_trend_entry_override" in decision.reasons
+    assert decision.status == DecisionStatus.REJECTED
+    assert "same_direction_limit_reached" in decision.reasons
 
 
 def test_strong_uptrend_override_keeps_circuit_breakers() -> None:
@@ -233,6 +236,19 @@ def test_rejects_position_direction_correlation_and_mode_limits() -> None:
     for risk_context, reason in cases:
         decision = RiskEngine().evaluate(signal(), snapshot(), risk_context)
         assert reason in decision.reasons
+
+
+def test_missing_correlation_is_rejected_even_when_limit_is_one() -> None:
+    existing = position(symbol="ETHUSDT", side=PositionSide.LONG)
+    limits = context().limits.model_copy(update={"correlation_limit": Decimal("1")})
+    decision = RiskEngine().evaluate(
+        signal(),
+        snapshot(),
+        context(limits=limits, positions=[existing], correlations={}),
+    )
+
+    assert decision.status == DecisionStatus.REJECTED
+    assert "correlation_data_missing:ETHUSDT" in decision.reasons
 
 
 def test_rejects_open_direction_outside_configured_policy() -> None:

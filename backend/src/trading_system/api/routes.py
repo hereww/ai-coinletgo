@@ -299,6 +299,10 @@ async def get_config(app_settings: AppSettings, _: CurrentUser) -> dict[str, Any
         "portfolio_strategy_enabled": app_settings.portfolio_strategy_enabled,
         "portfolio_rebalance_deadband_fraction": app_settings.portfolio_rebalance_deadband_fraction,
         "portfolio_rebalance_cooldown_minutes": app_settings.portfolio_rebalance_cooldown_minutes,
+        "factor_policy_enabled": app_settings.factor_policy_enabled,
+        "factor_rank_weight": app_settings.factor_rank_weight,
+        "factor_min_risk_multiplier": app_settings.factor_min_risk_multiplier,
+        "factor_promotion_windows": app_settings.factor_promotion_windows,
         "hft_enabled": app_settings.hft_enabled,
         "hft_dry_run": app_settings.hft_dry_run,
         "hft_symbols": app_settings.hft_symbols,
@@ -468,6 +472,11 @@ async def update_config(
             status.HTTP_409_CONFLICT,
             "strong trend entry override is limited to Binance testnet",
         )
+    if updates.get("factor_policy_enabled") and app_settings.binance_environment != "testnet":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "factor policy execution is limited to Binance testnet",
+        )
     # The UI confirms this whole configuration change with the operator password.
     proposed_min_stop = updates.get("min_stop_atr", app_settings.min_stop_atr)
     proposed_max_stop = updates.get("max_stop_atr", app_settings.max_stop_atr)
@@ -524,6 +533,7 @@ async def update_config(
                 "candidate_count",
                 "scan_interval_minutes",
                 "portfolio_rebalance_cooldown_minutes",
+                "factor_promotion_windows",
                 "hft_event_interval_ms",
                 "hft_cooldown_seconds",
                 "hft_max_consecutive_losses",
@@ -538,6 +548,7 @@ async def update_config(
                 "manual_exit_levels_enabled",
                 "model_primary_portfolio_enabled",
                 "strong_trend_entry_override_enabled",
+                "factor_policy_enabled",
                 "hft_symbols",
                 "hft_enabled",
                 "hft_dry_run",
@@ -906,3 +917,25 @@ async def list_factor_shadow_rankings(
     """Return read-only factor rankings recorded beside normal candidate ranking."""
 
     return await repo.list_factor_shadow_rankings(limit=min(max(limit, 1), 50))
+
+
+@router.get("/factors/policy")
+async def factor_policy_status(
+    repo: Repo, app_settings: AppSettings, _: CurrentUser
+) -> dict[str, object]:
+    """Return frozen ACTIVE/SHADOW versions and online promotion evidence."""
+
+    status_payload = await repo.factor_policy_status(
+        app_settings.factor_promotion_windows
+    )
+    return {
+        **status_payload,
+        "enabled": (
+            app_settings.factor_policy_enabled
+            and app_settings.binance_environment == "testnet"
+        ),
+        "environment": app_settings.binance_environment,
+        "rank_weight": app_settings.factor_rank_weight,
+        "minimum_risk_multiplier": app_settings.factor_min_risk_multiplier,
+        "promotion_windows": app_settings.factor_promotion_windows,
+    }

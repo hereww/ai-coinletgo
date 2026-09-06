@@ -7,6 +7,14 @@ import pytest
 
 from tests.factories import snapshot
 from trading_system.domain.models import Candle
+from trading_system.strategy.factor_policy import (
+    build_factor_overlays,
+    build_window_payload,
+    deterministic_percentiles,
+    mature_window_payload,
+    promotion_metrics,
+    rebalance_window,
+)
 from trading_system.strategy.factor_research import (
     align_funding_point_in_time,
     benjamini_hochberg,
@@ -191,3 +199,158 @@ def test_shadow_ranking_uses_only_passed_factors_and_respects_direction() -> Non
         snapshots,
         {"id": "run-2", "report": {"factors": [{"key": "watch", "status": "WATCH"}]}},
     ) is None
+
+
+def test_factor_overlay_orients_scores_and_penalizes_partial_coverage() -> None:
+    snapshots = [
+        snapshot(
+            symbol="AAAUSDT",
+            score=Decimal("3"),
+            factor_values={"momentum": Decimal("3"), "reversal": Decimal("1")},
+        ),
+        snapshot(
+            symbol="BBBUSDT",
+            score=Decimal("2"),
+            factor_values={"momentum": Decimal("2"), "reversal": Decimal("2")},
+        ),
+        snapshot(
+            symbol="CCCUSDT",
+            score=Decimal("1"),
+            factor_values={"momentum": Decimal("1")},
+        ),
+    ]
+    policy = {
+        "research_run_id": "run-policy",
+        "parameters": {"winsorize_quantile": "0.05", "interval": "1h", "rebalance_bars": 24},
+        "factors": [
+            {"key": "momentum", "direction": "POSITIVE"},
+            {"key": "reversal", "direction": "NEGATIVE"},
+        ],
+    }
+
+    overlays, ranking = build_factor_overlays(
+        snapshots,
+        policy,
+        status="SHADOW",
+        rank_weight=Decimal("0.2"),
+        minimum_risk_multiplier=Decimal("0.75"),
+    )
+
+    assert overlays["AAAUSDT"].contributions["reversal"] > 0
+    assert overlays["CCCUSDT"].factor_coverage == Decimal("0.5")
+    assert overlays["CCCUSDT"].risk_multiplier == Decimal("0.75")
+    assert "reversal" not in overlays["CCCUSDT"].contributions
+    assert [row["symbol"] for row in ranking["rankings"]] == [
+        "AAAUSDT",
+        "BBBUSDT",
+        "CCCUSDT",
+    ]
+    ranking["research_parameters"] = {
+        "taker_fee_rate": "0.001",
+        "slippage_rate": "0.002",
+    }
+    window = build_window_payload(
+        ranking,
+        window_start=datetime(2026, 9, 6, tzinfo=UTC),
+        window_end=datetime(2026, 9, 7, tzinfo=UTC),
+        candidate_count=2,
+    )
+    assert window["cost_assumptions"] == {
+        "fee_rate": "0.001",
+        "slippage_rate": "0.002",
+    }
+
+
+def test_factor_percentiles_and_window_buckets_are_deterministic() -> None:
+    percentiles, ranks = deterministic_percentiles(
+        {"BBBUSDT": Decimal("1"), "AAAUSDT": Decimal("1"), "CCCUSDT": Decimal("0")}
+    )
+    assert ranks == {"AAAUSDT": 1, "BBBUSDT": 2, "CCCUSDT": 3}
+    assert percentiles["AAAUSDT"] == Decimal("1")
+    first = rebalance_window(
+        datetime(2026, 9, 6, 1, 5, tzinfo=UTC),
+        {"parameters": {"interval": "1h", "rebalance_bars": 24}},
+    )
+    second = rebalance_window(
+        datetime(2026, 9, 6, 23, 55, tzinfo=UTC),
+        {"parameters": {"interval": "1h", "rebalance_bars": 24}},
+    )
+    assert first == second
+
+
+def test_shadow_window_maturity_and_promotion_gates() -> None:
+    payload = {
+        "window_start": datetime(2026, 9, 5, tzinfo=UTC).isoformat(),
+        "window_end": datetime(2026, 9, 6, tzinfo=UTC).isoformat(),
+        "candidate_count": 1,
+        "rankings": [
+            {
+                "symbol": "AAAUSDT",
+                "mark_price": "100",
+                "funding_rate": "0",
+                "factor_score": "1",
+                "baseline_rank": 2,
+                "combined_rank": 1,
+            },
+            {
+                "symbol": "BBBUSDT",
+                "mark_price": "100",
+                "funding_rate": "0",
+                "factor_score": "-1",
+                "baseline_rank": 1,
+                "combined_rank": 2,
+            },
+        ],
+    }
+    result = mature_window_payload(
+        payload,
+        {"AAAUSDT": Decimal("110"), "BBBUSDT": Decimal("99")},
+        fee_rate=Decimal("0"),
+        slippage_rate=Decimal("0"),
+    )
+    assert result is not None
+    assert Decimal(str(result["oriented_ic"])) > 0
+    windows = [
+        {"status": "MATURED", "window_start": str(index), "result": result}
+        for index in range(30)
+    ]
+    metrics = promotion_metrics(windows, 30)
+    assert metrics["eligible_for_promotion"] is True
+    assert metrics["failure_reasons"] == []
+
+
+def test_shadow_window_uses_frozen_research_cost_assumptions() -> None:
+    payload = {
+        "window_start": datetime(2026, 9, 5, tzinfo=UTC).isoformat(),
+        "window_end": datetime(2026, 9, 6, tzinfo=UTC).isoformat(),
+        "candidate_count": 1,
+        "cost_assumptions": {"fee_rate": "0.01", "slippage_rate": "0.02"},
+        "rankings": [
+            {
+                "symbol": "AAAUSDT",
+                "mark_price": "100",
+                "funding_rate": "0",
+                "factor_score": "1",
+                "baseline_rank": 1,
+                "combined_rank": 1,
+            },
+            {
+                "symbol": "BBBUSDT",
+                "mark_price": "100",
+                "funding_rate": "0",
+                "factor_score": "-1",
+                "baseline_rank": 2,
+                "combined_rank": 2,
+            },
+        ],
+    }
+
+    result = mature_window_payload(
+        payload,
+        {"AAAUSDT": Decimal("110"), "BBBUSDT": Decimal("90")},
+    )
+
+    assert result is not None
+    assert result["fee_rate"] == "0.01"
+    assert result["slippage_rate"] == "0.02"
+    assert result["shadow_net_return"] == "0.04"

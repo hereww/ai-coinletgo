@@ -41,6 +41,10 @@ const config = {
   portfolio_strategy_enabled: true,
   portfolio_rebalance_deadband_fraction: 0.1,
   portfolio_rebalance_cooldown_minutes: 30,
+  factor_policy_enabled: true,
+  factor_rank_weight: 0.2,
+  factor_min_risk_multiplier: 0.75,
+  factor_promotion_windows: 30,
   hft_enabled: false,
   hft_dry_run: true,
   hft_symbols: ['BTCUSDT', 'ETHUSDT'],
@@ -95,12 +99,12 @@ it('allows the scan interval to be configured from the supported cadence set', a
   await waitFor(() => expect(apiMock.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ scan_interval_minutes: 30 })))
 })
 
-it('explains that model-led decisions keep only hard capital safety checks', async () => {
+it('explains that model-led decisions cannot bypass portfolio hard limits', async () => {
   apiMock.config.mockResolvedValue(config)
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RiskPage /></QueryClientProvider>)
 
   expect(await screen.findByText('模型主导组合决策（测试网）')).toBeInTheDocument()
-  expect(screen.getByText(/置信度、ADX、趋势、15 分钟触发、最低盈亏比、相关性和调仓冷却不再否决/)).toBeInTheDocument()
+  expect(screen.getByText(/最低净盈亏比、单笔与组合风险、同向仓位、相关性、调仓冷却/)).toBeInTheDocument()
 })
 
 it('allows previously locked risk limits and wide stop ranges to be edited', async () => {

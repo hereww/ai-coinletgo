@@ -256,6 +256,67 @@ async def test_universe_skips_one_malformed_book_without_aborting_other_symbols(
 
 
 @pytest.mark.asyncio
+async def test_universe_and_entry_price_use_public_websocket_market_cache(
+    tmp_path: object,
+) -> None:
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    websocket_row = {
+        "quote_volume_24h": "2500000",
+        "best_bid": "99",
+        "best_ask": "101",
+        "mark_price": "100",
+        "index_price": "100",
+        "funding_rate": "0.0001",
+    }
+
+    class FakeMarketCache:
+        async def wait_for_symbols(self, symbols: set[str]) -> bool:
+            assert symbols == {"BTCUSDT"}
+            return True
+
+        def snapshots(self) -> dict[str, dict[str, str]]:
+            return {"BTCUSDT": websocket_row}
+
+        def snapshot(self, symbol: str) -> dict[str, str] | None:
+            return websocket_row if symbol == "BTCUSDT" else None
+
+        def book_snapshot(self, symbol: str) -> dict[str, str] | None:
+            return self.snapshot(symbol)
+
+        def mark_snapshot(self, symbol: str) -> dict[str, str] | None:
+            return self.snapshot(symbol)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fapi/v1/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "quoteAsset": "USDT",
+                            "contractType": "PERPETUAL",
+                            "status": "TRADING",
+                            "onboardDate": now_ms - 100 * 86_400_000,
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected REST request: {request.url}")
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    client.attach_market_cache(FakeMarketCache())  # type: ignore[arg-type]
+    try:
+        universe = await client.get_universe(30)
+        assert [item.symbol for item in universe] == ["BTCUSDT"]
+        assert await client.best_entry_price("BTCUSDT", "BUY") == Decimal("101")
+        assert await client.best_entry_price("BTCUSDT", "SELL") == Decimal("99")
+        assert await client.get_mark_price("BTCUSDT") == Decimal("100")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_best_entry_price_uses_marketable_side_of_book(tmp_path: object) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/fapi/v1/ticker/bookTicker":

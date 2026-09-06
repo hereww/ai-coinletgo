@@ -11,6 +11,7 @@ from trading_system.domain.models import (
     RiskLimits,
     TradeSignal,
 )
+from trading_system.strategy.exit_policy import first_take_profit
 
 
 class RiskEngine:
@@ -53,15 +54,11 @@ class RiskEngine:
         round_trip_cost += estimated_funding_cost
         net_reward = max(Decimal("0"), raw_reward - round_trip_cost)
         net_reward_risk = net_reward / (stop_distance + round_trip_cost)
-        if (
-            net_reward_risk < context.limits.min_net_reward_risk
-            and not model_primary
-            and not strong_trend_override_used
-        ):
+        if net_reward_risk < context.limits.min_net_reward_risk:
             return self._reject(signal, ["net_reward_risk_below_minimum"])
 
         capital_base = min(context.account.equity, context.limits.capital_limit_usdt)
-        risk_multiplier = snapshot.volatility_risk_multiplier
+        risk_multiplier = snapshot.effective_risk_multiplier
         risk_amount = (
             capital_base * context.limits.single_trade_risk_pct * risk_multiplier
         )
@@ -137,17 +134,19 @@ class RiskEngine:
     ) -> ExecutionIntent:
         if decision.status != DecisionStatus.APPROVED:
             raise ValueError("cannot execute a rejected risk decision")
-        risk_per_unit = abs(decision.entry_price - decision.stop_price)
         if signal.action == SignalAction.OPEN_LONG:
             side = PositionSide.LONG
-            tp1 = decision.entry_price + risk_per_unit
-            tp2 = decision.entry_price + risk_per_unit * Decimal("2")
         elif signal.action == SignalAction.OPEN_SHORT:
             side = PositionSide.SHORT
-            tp1 = decision.entry_price - risk_per_unit
-            tp2 = decision.entry_price - risk_per_unit * Decimal("2")
         else:
             raise ValueError("no-trade signals cannot be executed")
+        tp2 = decision.target_price
+        tp1 = first_take_profit(
+            entry=decision.entry_price,
+            stop_price=decision.stop_price,
+            final_target=tp2,
+            side=side,
+        )
         return ExecutionIntent(
             intent_id=signal.signal_id,
             signal_id=signal.signal_id,
@@ -214,20 +213,18 @@ class RiskEngine:
             PositionSide.LONG if signal.action == SignalAction.OPEN_LONG else PositionSide.SHORT
         )
         same_direction = sum(position.side == desired_side for position in context.positions)
-        if (
-            same_direction >= context.limits.max_same_direction
-            and not model_primary
-            and not strong_trend_override
-        ):
+        if same_direction >= context.limits.max_same_direction:
             reasons.append("same_direction_limit_reached")
         if any(position.symbol == signal.symbol for position in context.positions):
             reasons.append("existing_symbol_position")
-        if not model_primary and not strong_trend_override:
-            for position in context.positions:
-                correlation = abs(context.correlations.get(position.symbol, Decimal("1")))
-                if correlation > context.limits.correlation_limit:
-                    reasons.append(f"correlated_with_{position.symbol}")
-                    break
+        for position in context.positions:
+            correlation = context.correlations.get(position.symbol)
+            if correlation is None:
+                reasons.append(f"correlation_data_missing:{position.symbol}")
+                break
+            if abs(correlation) > context.limits.correlation_limit:
+                reasons.append(f"correlated_with_{position.symbol}")
+                break
 
         if signal.invalidation_price is not None:
             entry = self._entry_price(signal, snapshot)

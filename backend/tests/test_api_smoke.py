@@ -106,6 +106,9 @@ def test_factor_catalog_exposes_research_only_data_boundaries() -> None:
     shadow = client.get("/api/v1/factors/shadow")
     assert shadow.status_code == 200
     assert shadow.json() == []
+    policy = client.get("/api/v1/factors/policy")
+    assert policy.status_code == 200
+    assert policy.json()["promotion"]["required_windows"] == 30
 
 
 def test_factor_research_endpoint_passes_validated_parameters_to_service() -> None:

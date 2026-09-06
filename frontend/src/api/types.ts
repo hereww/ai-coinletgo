@@ -179,6 +179,10 @@ export interface RiskConfig {
   portfolio_strategy_enabled: boolean
   portfolio_rebalance_deadband_fraction: number
   portfolio_rebalance_cooldown_minutes: number
+  factor_policy_enabled: boolean
+  factor_rank_weight: number
+  factor_min_risk_multiplier: number
+  factor_promotion_windows: number
   hft_enabled: boolean
   hft_dry_run: boolean
   hft_symbols: string[]
@@ -351,6 +355,7 @@ export interface ReplayRun {
     start_date?: string | null
     end_date?: string | null
     portfolio_decision_id?: string | null
+    factor_research_run_id?: string | null
     backtest_config?: Record<string, string | number | null>
   }
   metrics: Record<string, unknown>
@@ -501,13 +506,73 @@ export interface FactorShadowRanking {
     selected_factors: Array<{ key: string; label: string; direction: string }>
     rankings: Array<{
       symbol: string
-      score: number
-      factor_coverage: number
-      contributions: Record<string, number>
+      baseline_score: string
+      baseline_percentile: string
+      factor_score: string
+      factor_percentile: string
+      combined_score: string
+      factor_coverage: string
+      contributions: Record<string, string>
+      risk_multiplier: string
+      baseline_rank: number
+      factor_rank: number
+      combined_rank: number
+      rank_change: number
     }>
+    window_start?: string
+    window_end?: string
+    window_created?: boolean
+    promotion?: FactorPromotionMetrics
     execution_effect: string
   }
   created_at: string
+}
+
+export interface FactorPolicyVersion {
+  id: string
+  research_run_id: string
+  status: 'ACTIVE' | 'SHADOW' | 'RETIRED' | 'REPLACED'
+  frozen_snapshot: {
+    completed_at?: string | null
+    factors: Array<{ key: string; label: string; direction: 'POSITIVE' | 'NEGATIVE' }>
+    parameters: Record<string, unknown>
+  }
+  activated_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface FactorPromotionMetrics {
+  matured_windows: number
+  required_windows: number
+  progress: string
+  oriented_mean_ic: string | null
+  shadow_net_return: string
+  baseline_net_return: string
+  shadow_max_drawdown: string
+  baseline_max_drawdown: string
+  candidate_turnover: string
+  gates: Record<string, boolean>
+  failure_reasons: string[]
+  eligible_for_promotion: boolean
+}
+
+export interface FactorPolicyStatus {
+  enabled: boolean
+  environment: 'testnet' | 'live'
+  rank_weight: number
+  minimum_risk_multiplier: number
+  promotion_windows: number
+  active: FactorPolicyVersion | null
+  shadow: FactorPolicyVersion | null
+  promotion: FactorPromotionMetrics
+  windows: Array<{
+    id: string
+    status: 'PENDING' | 'MATURED' | 'INVALID'
+    window_start: string
+    window_end: string
+    result: Record<string, unknown>
+  }>
 }
 
 export interface IntegrationStatus {

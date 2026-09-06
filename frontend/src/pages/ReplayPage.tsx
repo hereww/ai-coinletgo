@@ -25,9 +25,11 @@ export default function ReplayPage() {
   )
   const [endDate, setEndDate] = useState(beijingDate.format(now))
   const [decisionId, setDecisionId] = useState('')
+  const [factorRunId, setFactorRunId] = useState('')
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
   const runs = useQuery({ queryKey: ['replays'], queryFn: api.replays, refetchInterval: 5_000 })
   const decisions = useQuery({ queryKey: ['portfolio-decisions'], queryFn: api.portfolioDecisions })
+  const factorRuns = useQuery({ queryKey: ['factor-research'], queryFn: api.factorResearchRuns })
   const replay = useMutation({
     mutationFn: api.createReplay,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['replays'] }),
@@ -43,6 +45,7 @@ export default function ReplayPage() {
       symbols: symbols.split(',').map((item) => item.trim().toUpperCase()).filter(Boolean),
       start_date: startDate,
       end_date: endDate,
+      factor_research_run_id: factorRunId || undefined,
       backtest_config: config.data ? {
         risk_pct: String(config.data.single_trade_risk_pct),
         portfolio_risk_pct: String(config.data.portfolio_risk_pct),
@@ -73,6 +76,16 @@ export default function ReplayPage() {
   const maxDrawdown = summary?.max_drawdown_pct ?? summary?.worst_max_drawdown_pct
   const validation = latest?.metrics.validation as { out_of_sample?: { summary?: Record<string, string | number | boolean> } } | undefined
   const outOfSample = validation?.out_of_sample?.summary
+  const factorComparison = latest?.metrics.factor_comparison as {
+    available?: boolean
+    research_run_id?: string | null
+    factor_off?: { net_return?: string }
+    factor_on?: { net_return?: string; oriented_mean_ic?: string | null; factor_risk_clippings?: number }
+  } | undefined
+  const paperOutcome = latest?.metrics.paper_outcome as { status?: string; summary?: { net_pnl_usdt?: string } } | undefined
+  const eligibleFactorRuns = (factorRuns.data ?? []).filter((run) =>
+    run.status === 'COMPLETED' && 'summary' in run.report && Number(run.report.summary.passed) > 0,
+  )
 
   return <>
     <PageHeader title="历史回放" subtitle="可重复的本地策略回放与 Portfolio-v1 决策复现 · 北京时间" />
@@ -92,6 +105,14 @@ export default function ReplayPage() {
             <label className="field-label">开始日期<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} required /></label>
             <label className="field-label">结束日期<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} required /></label>
           </div>
+          <label className="field-label">因子对照版本
+            <select value={factorRunId} onChange={(event) => setFactorRunId(event.target.value)}>
+              <option value="">关闭因子，仅跑原策略</option>
+              {eligibleFactorRuns.map((run) => <option key={run.id} value={run.id}>
+                {run.completed_at ? beijingDate.format(new Date(run.completed_at)) : '已完成'} · {run.id.slice(0, 8)}
+              </option>)}
+            </select>
+          </label>
         </> : <>
           <p className="form-help">使用已保存的决策、市场快照、账户状态、交易所规则和编译器时钟，验证调仓计划是否可重复。</p>
           <label className="field-label">组合决策
@@ -117,6 +138,8 @@ export default function ReplayPage() {
           {isRecorded ? <>
             <div><dt>编译计划</dt><dd>{summary?.compiler_plan_match === true ? '一致' : summary?.compiler_plan_match === false ? '不一致' : '—'}</dd></div>
             <div><dt>计划动作</dt><dd>{summary?.planned_actions ?? '—'}</dd></div>
+            <div><dt>Paper 结算</dt><dd>{paperOutcome?.status ?? '—'}</dd></div>
+            <div><dt>Paper 净收益</dt><dd>{paperOutcome?.summary?.net_pnl_usdt !== undefined ? `${Number(paperOutcome.summary.net_pnl_usdt).toFixed(2)} USDT` : '—'}</dd></div>
           </> : <>
             <div><dt>组合净收益</dt><dd>{netReturn !== undefined ? `${(Number(netReturn) * 100).toFixed(2)}%` : '—'}</dd></div>
             <div><dt>组合最大回撤</dt><dd>{maxDrawdown !== undefined ? `${(Number(maxDrawdown) * 100).toFixed(2)}%` : '—'}</dd></div>
@@ -124,6 +147,13 @@ export default function ReplayPage() {
             <div><dt>合约数</dt><dd>{summary?.symbols_tested ?? '—'}</dd></div>
             <div><dt>样本外胜率</dt><dd>{outOfSample?.win_rate !== undefined ? `${(Number(outOfSample.win_rate) * 100).toFixed(1)}%` : '—'}</dd></div>
             <div><dt>样本外交易数</dt><dd>{outOfSample?.total_trades ?? '—'}</dd></div>
+            <div><dt>因子版本</dt><dd>{factorComparison?.research_run_id?.slice(0, 8) ?? '关闭'}</dd></div>
+            {factorComparison?.available ? <>
+              <div><dt>因子关闭收益</dt><dd>{factorComparison.factor_off?.net_return !== undefined ? `${(Number(factorComparison.factor_off.net_return) * 100).toFixed(2)}%` : '—'}</dd></div>
+              <div><dt>因子开启收益</dt><dd>{factorComparison.factor_on?.net_return !== undefined ? `${(Number(factorComparison.factor_on.net_return) * 100).toFixed(2)}%` : '—'}</dd></div>
+              <div><dt>方向调整 IC</dt><dd>{factorComparison.factor_on?.oriented_mean_ic ?? '—'}</dd></div>
+              <div><dt>因子风险裁剪</dt><dd>{factorComparison.factor_on?.factor_risk_clippings ?? 0}</dd></div>
+            </> : null}
           </>}
         </dl>
         {replay.data ? <div className="success-note">任务 {replay.data.id} 已进入队列</div> : null}
