@@ -1,13 +1,16 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from tests.factories import position, snapshot
-from trading_system.domain.enums import ReviewAction
-from trading_system.domain.models import Candle, ExchangeFilters, PositionReview
+from trading_system.config import Settings
+from trading_system.domain.enums import ReviewAction, SystemMode
+from trading_system.domain.models import AccountState, Candle, ExchangeFilters, PositionReview
 from trading_system.exchange.base import ExchangeError
 from trading_system.orchestration.cycle import CycleResult, TradingCycle
+from trading_system.risk.engine import RiskEngine
 from trading_system.strategy.indicators import (
     atr,
     classify_market_regime,
@@ -18,6 +21,7 @@ from trading_system.strategy.indicators import (
     trend_direction,
     volatility_risk_multiplier,
 )
+from trading_system.strategy.rule_based import RuleBasedStrategy
 from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import volatility_percentile
 
@@ -162,6 +166,76 @@ def test_screener_allows_strong_uptrend_without_15m_trigger_when_enabled() -> No
     assert reasons == []
 
 
+def test_rule_based_strategy_generates_long_without_15m_trigger_on_strong_trend() -> None:
+    settings = Settings(
+        model_strategy_enabled=False,
+        manual_exit_levels_enabled=True,
+        manual_stop_atr=Decimal("1.8"),
+        manual_take_profit_atr=Decimal("5"),
+        min_net_reward_risk=Decimal("2.5"),
+    )
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+    signals = RuleBasedStrategy(settings).build_signals(
+        [snapshot(breakout_15m=0, pullback_15m=0, adx_1h=Decimal("35"))],
+        expires_at,
+    )
+
+    assert len(signals) == 1
+    assert signals[0].action.value == "OPEN_LONG"
+    assert signals[0].reason_codes[-1] == "STRONG_TREND_CONTINUATION"
+    assert signals[0].risk_flags[0] == "MODEL_DISABLED"
+    assert signals[0].target_price is not None
+    assert signals[0].target_price > signals[0].entry_max
+
+
+def test_rule_based_strategy_uses_minimum_adx_for_local_continuation() -> None:
+    settings = Settings(model_strategy_enabled=False, strong_trend_adx_min=Decimal("35"))
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+    signals = RuleBasedStrategy(settings).build_signals(
+        [snapshot(breakout_15m=0, pullback_15m=0, adx_1h=Decimal("22"))],
+        expires_at,
+    )
+
+    assert len(signals) == 1
+    assert signals[0].reason_codes[-1] == "LOCAL_TREND_CONTINUATION"
+
+
+def test_rule_based_strategy_allows_short_trend_continuation_when_model_disabled() -> None:
+    settings = Settings(model_strategy_enabled=False)
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    waiting = snapshot(
+        trend_1h=-1,
+        trend_4h=-1,
+        breakout_15m=0,
+        pullback_15m=0,
+        adx_1h=Decimal("35"),
+    )
+
+    signals = RuleBasedStrategy(settings).build_signals([waiting], expires_at)
+
+    assert len(signals) == 1
+    assert signals[0].action.value == "OPEN_SHORT"
+    assert "LOCAL_TREND_CONTINUATION" in signals[0].reason_codes
+
+
+def test_rule_based_strategy_skips_impossible_atr_geometry() -> None:
+    settings = Settings(model_strategy_enabled=False)
+    malformed = snapshot(
+        atr_15m=Decimal("1"),
+        mark_price=Decimal("0.01"),
+        best_bid=Decimal("0.009"),
+        best_ask=Decimal("0.011"),
+    )
+
+    signals = RuleBasedStrategy(settings).build_signals(
+        [malformed], datetime.now(UTC) + timedelta(minutes=5)
+    )
+
+    assert signals == []
+
+
 @pytest.mark.asyncio
 async def test_cycle_status_marks_partial_execution_failure_before_executed() -> None:
     class Redis:
@@ -228,6 +302,210 @@ def test_portfolio_screener_keeps_safe_watchlist_without_setup_trigger() -> None
     assert MarketScreener().portfolio_eligible(waiting) is True
     ranked = MarketScreener().rank_portfolio([waiting])
     assert [item.symbol for item in ranked] == [waiting.symbol]
+
+
+def test_model_primary_signal_cycle_uses_market_safe_watchlist() -> None:
+    waiting = snapshot(breakout_15m=0, pullback_15m=0)
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.settings = SimpleNamespace(
+        portfolio_strategy_enabled=False,
+        model_primary_portfolio_enabled=True,
+        candidate_count=3,
+    )
+    cycle.screener = MarketScreener(model_primary_portfolio_enabled=True)
+
+    candidates = cycle._rank_cycle_candidates([waiting])
+
+    assert [item.symbol for item in candidates] == [waiting.symbol]
+
+
+def test_disabled_model_cycle_ranks_local_continuation_setups_before_candidate_limit() -> None:
+    waiting = snapshot(symbol="WAITUSDT", breakout_15m=0, pullback_15m=0)
+    triggered = snapshot(symbol="TRIGUSDT", breakout_15m=1, pullback_15m=0)
+    strong = snapshot(
+        symbol="STRONGUSDT", breakout_15m=0, pullback_15m=0, adx_1h=Decimal("35")
+    )
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.settings = SimpleNamespace(
+        model_strategy_enabled=False,
+        portfolio_strategy_enabled=False,
+        model_primary_portfolio_enabled=True,
+        candidate_count=2,
+    )
+    cycle.screener = MarketScreener()
+    cycle.rule_based = RuleBasedStrategy(Settings(model_strategy_enabled=False))
+
+    candidates = cycle._rank_cycle_candidates([waiting, triggered, strong])
+
+    assert len(candidates) == 2
+    assert {item.symbol for item in candidates}.issubset(
+        {"WAITUSDT", "TRIGUSDT", "STRONGUSDT"}
+    )
+
+
+def test_disabled_model_risk_limits_cannot_keep_model_primary_bypass() -> None:
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.settings = Settings(
+        model_strategy_enabled=False,
+        model_primary_portfolio_enabled=True,
+    )
+
+    limits = cycle._risk_limits()
+
+    assert limits.model_primary_portfolio_enabled is False
+    assert limits.rule_based_strategy_enabled is True
+
+
+def test_non_primary_signal_cycle_keeps_strict_setup_gate() -> None:
+    waiting = snapshot(breakout_15m=0, pullback_15m=0)
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.settings = SimpleNamespace(
+        portfolio_strategy_enabled=False,
+        model_primary_portfolio_enabled=False,
+        candidate_count=3,
+    )
+    cycle.screener = MarketScreener()
+
+    assert cycle._rank_cycle_candidates([waiting]) == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_model_cycle_uses_local_signal_without_model_call() -> None:
+    settings = Settings(
+        model_strategy_enabled=False,
+        model_primary_portfolio_enabled=True,
+        factor_policy_enabled=False,
+    )
+    market = snapshot()
+    account = AccountState(
+        equity=Decimal("1000"),
+        available_balance=Decimal("1000"),
+        day_start_equity=Decimal("1000"),
+        high_water_mark=Decimal("1000"),
+    )
+
+    class Redis:
+        pass
+
+    class Repository:
+        def __init__(self) -> None:
+            self.saved_signals: list[dict[str, object]] = []
+            self.risk_decisions = 0
+
+        async def apply_runtime_config(self, settings: Settings) -> None:
+            del settings
+
+        async def get_mode(self, default: SystemMode, environment: str) -> SystemMode:
+            del default, environment
+            return SystemMode.TESTNET
+
+        async def hydrate_positions(self, positions: list[object]) -> list[object]:
+            return positions
+
+        async def save_income_ledger(self, rows: list[dict[str, object]]) -> None:
+            del rows
+
+        async def apply_equity_checkpoints(
+            self, value: AccountState, **kwargs: object
+        ) -> AccountState:
+            del kwargs
+            return value
+
+        async def known_open_position_keys(self) -> set[tuple[str, str]]:
+            return set()
+
+        async def sync_positions(self, positions: list[object]) -> None:
+            del positions
+
+        async def save_market_snapshots(self, snapshots: list[object]) -> None:
+            del snapshots
+
+        async def save_signal(self, signal: object, **kwargs: object) -> None:
+            self.saved_signals.append({"signal": signal, **kwargs})
+
+        async def save_risk_decision(self, decision: object) -> None:
+            del decision
+            self.risk_decisions += 1
+
+        async def save_orders(self, orders: list[object]) -> None:
+            del orders
+
+    class Exchange:
+        last_income_ledger: list[dict[str, object]] = []
+
+        async def health_check(self) -> tuple[bool, str]:
+            return True, "ok"
+
+        async def get_account_state(self) -> AccountState:
+            return account
+
+        async def get_positions(self) -> list[object]:
+            return []
+
+        async def get_universe(self, limit: int) -> list[object]:
+            del limit
+            return []
+
+        async def get_filters(self, symbol: str) -> ExchangeFilters:
+            del symbol
+            return ExchangeFilters(
+                tick_size=Decimal("0.1"),
+                step_size=Decimal("0.1"),
+                min_quantity=Decimal("0.1"),
+                min_notional=Decimal("5"),
+            )
+
+    class Model:
+        configured = True
+
+        async def analyze(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise AssertionError("disabled model strategy must not call analyze")
+
+    class Execution:
+        last_emergency_orders: list[object] = []
+
+        async def execute(self, intent: object) -> tuple[object, list[object]]:
+            return SimpleNamespace(filled_quantity=intent.quantity), []
+
+    class Notifier:
+        async def send(self, title: str, message: str) -> None:
+            del title, message
+
+    repository = Repository()
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.settings = settings
+    cycle.redis = Redis()
+    cycle.repository = repository
+    cycle.exchange = Exchange()
+    cycle.market_exchange = cycle.exchange
+    cycle.model = Model()
+    cycle.notifier = Notifier()
+    cycle.screener = MarketScreener()
+    cycle.rule_based = RuleBasedStrategy(settings)
+    cycle.risk = RiskEngine()
+    cycle.execution = Execution()
+
+    async def build_snapshots(universe: list[object]) -> list[object]:
+        del universe
+        return [market]
+
+    async def apply_factor_policy(
+        snapshots: list[object],
+    ) -> tuple[list[object], object]:
+        return snapshots, SimpleNamespace()
+
+    cycle._build_snapshots = build_snapshots
+    cycle._apply_factor_policy = apply_factor_policy
+
+    result = await cycle._run_locked(CycleResult())
+
+    assert result.signals == 1
+    assert result.approved == 1
+    assert result.executed == 1
+    assert result.detail == "本地规则策略周期已完成"
+    assert repository.risk_decisions == 1
+    assert repository.saved_signals[0]["model_name"] == "rule-based-v1"
 
 
 @pytest.mark.asyncio

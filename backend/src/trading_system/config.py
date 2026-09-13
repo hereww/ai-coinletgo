@@ -23,6 +23,9 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "model_base_url",
         "model_name",
         "model_profile",
+        "vllm_model_base_url",
+        "vllm_model_name",
+        "vllm_model_label",
         "model_reasoning_effort",
         "model_timeout_seconds",
         "strategy_profile",
@@ -46,6 +49,7 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "high_volatility_risk_multiplier",
         "entry_symbols",
         "scan_interval_minutes",
+        "model_strategy_enabled",
         "portfolio_strategy_enabled",
         "portfolio_rebalance_deadband_fraction",
         "portfolio_rebalance_cooldown_minutes",
@@ -68,6 +72,10 @@ RUNTIME_CONFIG_FIELDS = frozenset(
     }
 )
 
+HISTORICAL_RESEARCH_DISABLED_MESSAGE = (
+    "历史研究已暂停，仅保留模型驱动的 Binance 测试网自动交易"
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -83,6 +91,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./trading.db"
     redis_url: str = "redis://localhost:6379/0"
     secret_dir: Path = Path("/run/secrets")
+    runtime_secret_dir: Path = Path("/run/runtime-secrets")
     allowed_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     auth_required: bool = False
@@ -99,6 +108,8 @@ class Settings(BaseSettings):
     binance_environment: Literal["testnet", "live"] = "testnet"
     binance_testnet_base_url: str = "https://testnet.binancefuture.com"
     binance_live_base_url: str = "https://fapi.binance.com"
+    binance_historical_data_url: str = "https://data.binance.vision"
+    historical_research_enabled: bool = False
     binance_ws_testnet_url: str = "wss://stream.binancefuture.com"
     binance_ws_live_url: str = "wss://fstream.binance.com"
     binance_recv_window_ms: int = 5_000
@@ -163,12 +174,12 @@ class Settings(BaseSettings):
     # Testnet can delegate opportunity selection to the model.  The risk
     # compiler still owns hard stops, sizing, margin/balance checks, exchange
     # constraints, system mode, and circuit breakers.
-    model_primary_portfolio_enabled: bool = True
+    model_primary_portfolio_enabled: bool = False
     # Testnet may bypass ordinary opportunity-policy filters when both higher
     # timeframes show a strong uptrend. Hard stop geometry, portfolio risk,
     # margin/balance, total positions, exchange constraints and circuit
     # breakers remain mandatory.
-    strong_trend_entry_override_enabled: bool = True
+    strong_trend_entry_override_enabled: bool = False
     strong_trend_adx_min: float = Field(default=30.0, ge=0)
     trend_adx_min: float = Field(default=20.0, ge=0)
     volatility_soft_limit_percentile: float = Field(default=0.75, ge=0, le=1)
@@ -176,22 +187,25 @@ class Settings(BaseSettings):
     elevated_volatility_risk_multiplier: float = Field(default=0.75, gt=0, le=1)
     high_volatility_risk_multiplier: float = Field(default=0.50, gt=0, le=1)
     min_confidence: float = Field(default=0.75, ge=0, le=1)
-    min_net_reward_risk: float = Field(default=1.8, gt=0)
+    min_net_reward_risk: float = Field(default=2.5, gt=0)
     max_spread_pct: float = 0.0015
     max_abs_funding_rate: float = 0.001
     max_abs_basis_pct: float = 0.01
     min_book_depth_usdt: float = 50_000.0
     universe_size: int = 30
-    candidate_count: int = Field(default=8, ge=1)
+    candidate_count: int = Field(default=3, ge=1)
     # The scheduler uses a small, explicit cadence set so model expiry and
     # operator expectations remain predictable.
     scan_interval_minutes: Literal[5, 15, 30, 60] = 5
     min_listing_days: int = 90
     # Portfolio-v1 and HFT are testnet-only features. HFT defaults to shadow
     # execution: it consumes the live depth stream but never submits orders.
-    portfolio_strategy_enabled: bool = True
-    portfolio_rebalance_deadband_fraction: float = Field(default=0.10, ge=0, le=1)
-    portfolio_rebalance_cooldown_minutes: int = Field(default=30, ge=0, le=1_440)
+    # When disabled on testnet, the worker uses the deterministic rule-based
+    # fallback and does not call the remote model.
+    model_strategy_enabled: bool = True
+    portfolio_strategy_enabled: bool = False
+    portfolio_rebalance_deadband_fraction: float = Field(default=0.25, ge=0, le=1)
+    portfolio_rebalance_cooldown_minutes: int = Field(default=120, ge=0, le=1_440)
     factor_policy_enabled: bool = True
     factor_rank_weight: float = Field(default=0.20, ge=0, le=1)
     factor_min_risk_multiplier: float = Field(default=0.75, gt=0, le=1)
@@ -242,12 +256,16 @@ class Settings(BaseSettings):
                 "portfolio_risk_pct": 0.012,
                 "max_leverage": 30,
                 "max_positions": 4,
-                "candidate_count": 8,
-                "min_net_reward_risk": 1.8,
+                "candidate_count": 3,
+                "min_net_reward_risk": 2.5,
                 "max_stop_atr": 4.0,
                 "manual_exit_levels_enabled": True,
-                "model_primary_portfolio_enabled": True,
-                "strong_trend_entry_override_enabled": True,
+                "model_primary_portfolio_enabled": False,
+                "strong_trend_entry_override_enabled": False,
+                "model_strategy_enabled": True,
+                "portfolio_strategy_enabled": False,
+                "portfolio_rebalance_deadband_fraction": 0.25,
+                "portfolio_rebalance_cooldown_minutes": 120,
                 "factor_policy_enabled": True,
             }
         )
@@ -312,6 +330,8 @@ class Settings(BaseSettings):
                 raise ValueError("model-primary portfolio mode is limited to Binance testnet")
             if self.strong_trend_entry_override_enabled:
                 raise ValueError("strong trend entry override is limited to Binance testnet")
+            if not self.model_strategy_enabled:
+                raise ValueError("model strategy cannot be disabled for live Binance environment")
             if self.factor_policy_enabled:
                 raise ValueError("factor policy execution is limited to Binance testnet")
         if self.app_env == "production":
@@ -334,6 +354,11 @@ class Settings(BaseSettings):
             if websocket.scheme != "wss" or websocket.hostname not in allowed_ws_hosts:
                 raise ValueError(
                     "production Binance WebSocket URL is not an approved official endpoint"
+                )
+            historical = urlparse(self.binance_historical_data_url)
+            if historical.scheme != "https" or historical.hostname != "data.binance.vision":
+                raise ValueError(
+                    "production Binance historical data URL is not an approved official endpoint"
                 )
         if self.binance_environment == "live":
             if self.portfolio_strategy_enabled:
@@ -395,12 +420,32 @@ class Settings(BaseSettings):
         return value
 
     def read_secret(self, name: str) -> str | None:
-        path = self.secret_dir / name
-        try:
-            value = path.read_text(encoding="utf-8").strip()
-        except (FileNotFoundError, OSError):
-            return None
-        return value or None
+        # Runtime-managed secrets take precedence over immutable deployment
+        # secrets. This lets the authenticated settings API rotate model keys
+        # without putting them in the database or browser payloads.
+        for directory in (self.runtime_secret_dir, self.secret_dir):
+            path = directory / name
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except (FileNotFoundError, OSError):
+                continue
+            if value:
+                return value
+        return None
+
+    def write_runtime_secret(self, name: str, value: str) -> None:
+        if name not in {"model_api_key", "vllm_model_api_key"}:
+            raise ValueError("unsupported runtime secret")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("API key cannot be empty")
+        directory = self.runtime_secret_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        temporary = directory / f".{name}.tmp"
+        temporary.write_text(f"{normalized}\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
 
     @property
     def database_connection_url(self) -> str:

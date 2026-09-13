@@ -30,6 +30,23 @@ from trading_system.risk.portfolio import PortfolioCompiler
 
 
 @pytest.mark.asyncio
+async def test_replay_service_fails_closed_when_historical_research_is_disabled() -> None:
+    class RejectingRepository:
+        async def create_replay(self, parameters: dict[str, object]) -> str:
+            raise AssertionError(f"repository should not be called: {parameters}")
+
+    service = ReplayService(
+        cast(Repository, RejectingRepository()),
+        cast(BinanceUSDMarketClient, object()),
+        cast(TelegramNotifier, object()),
+        Settings(historical_research_enabled=False),
+    )
+
+    with pytest.raises(RuntimeError, match="历史研究已暂停"):
+        await service.create({"mode": "deterministic"})
+
+
+@pytest.mark.asyncio
 async def test_deterministic_replay_freezes_factor_policy_and_weights(
     tmp_path: object,
 ) -> None:
@@ -59,6 +76,7 @@ async def test_deterministic_replay_freezes_factor_policy_and_weights(
         },
     )
     settings = Settings(
+        historical_research_enabled=True,
         factor_rank_weight=0.35,
         factor_min_risk_multiplier=0.70,
     )

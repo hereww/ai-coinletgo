@@ -75,22 +75,47 @@ class SystemController:
             now = time.monotonic()
             if not deep and self._health_cache and now - self._health_cache[0] < 30:
                 return self._health_cache[1]
-            components = [
-                await self._database_health(),
-                await self._redis_health(),
-                await self._exchange_health(),
-                await self._model_health(deep=deep),
-                self._auth_health(),
-            ]
+            components = await self._health_components(deep=deep)
             if self.settings.binance_environment == "live":
                 components.append(await self._worker_health())
             report = HealthReport(
-                ready=all(component.state == HealthState.HEALTHY for component in components),
+                ready=self._health_ready(components),
                 components=components,
             )
             if not deep:
                 self._health_cache = (time.monotonic(), report)
             return report
+
+    async def _health_components(self, *, deep: bool) -> list[HealthComponent]:
+        """Build the health gate for the currently selected trading path."""
+
+        components = [
+            await self._database_health(),
+            await self._redis_health(),
+            await self._exchange_health(),
+            await self._model_health(deep=deep),
+            self._auth_health(),
+        ]
+        return components
+
+    def _health_ready(self, components: list[HealthComponent]) -> bool:
+        """Ignore only the unused model relay in local testnet mode."""
+
+        return all(
+            component.state == HealthState.HEALTHY
+            for component in components
+            if not (
+                self._local_strategy_without_model()
+                and component.name == "model_relay"
+            )
+        )
+
+    def _local_strategy_without_model(self) -> bool:
+        return (
+            not getattr(self.settings, "model_strategy_enabled", True)
+            and not self.settings.portfolio_strategy_enabled
+            and self.settings.binance_environment == "testnet"
+        )
 
     async def pause(self, reason: str = "operator_pause") -> SystemMode:
         cancellation_error: Exception | None = None
@@ -107,7 +132,14 @@ class SystemController:
     async def queue_cycle(self) -> str:
         if not self.exchange.configured:
             raise ValueError("Binance credentials are not configured")
-        if not self.model.configured:
+        # The deterministic rule-based path deliberately does not depend on
+        # the model relay. Portfolio-v1 still does, even when the legacy
+        # signal model switch is off, so keep the requirement for that path.
+        needs_model = (
+            getattr(self.settings, "model_strategy_enabled", True)
+            or self.settings.portfolio_strategy_enabled
+        )
+        if needs_model and not self.model.configured:
             raise ValueError("model relay is not configured")
         mode = await self.repository.get_mode(
             SystemMode.TESTNET
@@ -238,17 +270,11 @@ class SystemController:
                 halt_reason="simultaneous long and short position detected",
             )
             raise ValueError("simultaneous long and short position detected")
-        components = [
-            await self._database_health(),
-            await self._redis_health(),
-            await self._exchange_health(),
-            await self._model_health(deep=True),
-            self._auth_health(),
-        ]
+        components = await self._health_components(deep=True)
         if self.settings.binance_environment == "live":
             components.append(await self._worker_health())
         report = HealthReport(
-            ready=all(component.state == HealthState.HEALTHY for component in components),
+            ready=self._health_ready(components),
             components=components,
         )
         if not report.ready:

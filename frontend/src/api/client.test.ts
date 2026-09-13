@@ -100,6 +100,7 @@ it('does not echo read-only model metadata when saving risk configuration', asyn
     max_leverage: 20,
     model_name: 'gpt-5.6',
     strategy_profile: 'trend_following',
+    historical_research_enabled: true,
     password: 'operator-password',
   })
 

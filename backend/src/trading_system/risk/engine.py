@@ -36,6 +36,9 @@ class RiskEngine:
         strong_trend_override_used = self._strong_uptrend_override(
             signal, snapshot, context.limits
         )
+        local_continuation_used = self._local_trend_continuation(
+            signal, snapshot, context.limits
+        )
         model_primary = context.limits.model_primary_portfolio_enabled
 
         entry = self._entry_price(signal, snapshot)
@@ -113,6 +116,8 @@ class RiskEngine:
             reasons=(
                 ["model_primary_opportunity_accepted", "all_hard_limits_passed"]
                 if model_primary
+                else ["local_trend_continuation", "all_hard_limits_passed"]
+                if local_continuation_used
                 else ["strong_trend_entry_override"]
                 if strong_trend_override_used
                 else ["all_hard_limits_passed"]
@@ -202,7 +207,10 @@ class RiskEngine:
             trigger_matches = self._configured_entry_trigger_matches(
                 signal, snapshot, context.limits.entry_trigger
             )
-            if not trigger_matches and not strong_trend_override:
+            local_continuation = self._local_trend_continuation(
+                signal, snapshot, context.limits
+            )
+            if not trigger_matches and not strong_trend_override and not local_continuation:
                 reasons.append("no_aligned_entry_trigger")
         if snapshot.volatility_risk_multiplier <= 0:
             reasons.append("invalid_volatility_risk_multiplier")
@@ -279,6 +287,33 @@ class RiskEngine:
             and snapshot.trend_1h == 1
             and snapshot.trend_4h == 1
             and snapshot.adx_1h >= limits.strong_trend_adx_min
+        )
+
+    @staticmethod
+    def _local_trend_continuation(
+        signal: TradeSignal,
+        snapshot: MarketSnapshot,
+        limits: RiskLimits,
+    ) -> bool:
+        """Allow only the model-disabled local strategy to enter a trend.
+
+        This is deliberately narrower than a model-primary bypass: direction,
+        regime, ADX, stops, costs, sizing, correlation and all circuit
+        breakers remain enforced by the surrounding preflight/evaluation.
+        """
+
+        return (
+            limits.rule_based_strategy_enabled
+            and "MODEL_DISABLED" in signal.risk_flags
+            and signal.action in {SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT}
+            and snapshot.market_regime == "TRENDING"
+            and snapshot.trend_1h != 0
+            and snapshot.trend_1h == snapshot.trend_4h
+            and snapshot.adx_1h >= limits.trend_adx_min
+            and (
+                signal.action == SignalAction.OPEN_LONG and snapshot.trend_1h == 1
+                or signal.action == SignalAction.OPEN_SHORT and snapshot.trend_1h == -1
+            )
         )
 
     @staticmethod

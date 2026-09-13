@@ -15,6 +15,7 @@ from trading_system.api.schemas import (
     ManualEntryAdviceRequest,
     ManualEntryRequest,
     ModelProfileSelectRequest,
+    ModelProfileUpdateRequest,
     ModelRelayUpdateRequest,
     PasswordActionRequest,
     PnlSyncRequest,
@@ -23,7 +24,7 @@ from trading_system.api.schemas import (
 )
 from trading_system.api.security import CurrentUser, MutatingUser, SecurityService
 from trading_system.backtest.service import ReplayService
-from trading_system.config import Settings
+from trading_system.config import HISTORICAL_RESEARCH_DISABLED_MESSAGE, Settings
 from trading_system.exchange.base import ExchangeError
 from trading_system.persistence.repository import Repository
 from trading_system.strategy.factor_service import FactorResearchService
@@ -278,6 +279,8 @@ async def get_config(app_settings: AppSettings, _: CurrentUser) -> dict[str, Any
         "entry_trigger": app_settings.entry_trigger,
         "candidate_count": app_settings.candidate_count,
         "scan_interval_minutes": app_settings.scan_interval_minutes,
+        "model_strategy_enabled": app_settings.model_strategy_enabled,
+        "historical_research_enabled": app_settings.historical_research_enabled,
         "min_confidence": app_settings.min_confidence,
         "min_net_reward_risk": app_settings.min_net_reward_risk,
         "min_stop_atr": app_settings.min_stop_atr,
@@ -399,6 +402,65 @@ async def update_model_integration(
     }
 
 
+@router.patch("/integrations/model/config")
+async def update_model_profile(
+    payload: ModelProfileUpdateRequest,
+    request: Request,
+    user: MutatingUser,
+    app_settings: AppSettings,
+    service: Controller,
+    repo: Repo,
+) -> dict[str, Any]:
+    if (
+        app_settings.binance_environment == "live"
+        and payload.base_url
+        and not payload.base_url.startswith("https://")
+    ):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Live Binance environment requires an HTTPS model endpoint",
+        )
+    prefix = "vllm_" if payload.profile_id == "vllm" else ""
+    updates = {
+        f"{prefix}model_base_url": payload.base_url,
+        f"{prefix}model_name": payload.model_name,
+        "model_reasoning_effort": payload.reasoning_effort,
+        "model_timeout_seconds": payload.timeout_seconds,
+        "strategy_profile": payload.strategy_profile,
+    }
+    await repo.save_runtime_config(updates)
+    for key, value in updates.items():
+        setattr(app_settings, key, value)
+    if payload.api_key is not None:
+        try:
+            app_settings.write_runtime_secret(
+                "vllm_model_api_key" if payload.profile_id == "vllm" else "model_api_key",
+                payload.api_key,
+            )
+        except (OSError, ValueError) as error:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Unable to write the model API key to the runtime secret store",
+            ) from error
+    service.invalidate_health_cache()
+    await repo.audit(
+        actor=user.username,
+        action="update_model_profile",
+        resource=payload.profile_id,
+        outcome="success",
+        detail={
+            "profile_id": payload.profile_id,
+            "model_name": payload.model_name,
+            "base_url_configured": bool(payload.base_url),
+            "api_key_updated": payload.api_key is not None,
+            "reasoning_effort": payload.reasoning_effort,
+            "strategy_profile": payload.strategy_profile,
+        },
+        ip_address=request.client.host if request.client else None,
+    )
+    return cast(dict[str, Any], (await service.integration_status())["model"])
+
+
 @router.patch("/integrations/model/profile")
 async def select_model_profile(
     payload: ModelProfileSelectRequest,
@@ -472,10 +534,23 @@ async def update_config(
             status.HTTP_409_CONFLICT,
             "strong trend entry override is limited to Binance testnet",
         )
+    if (
+        updates.get("model_strategy_enabled") is False
+        and app_settings.binance_environment != "testnet"
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "model strategy cannot be disabled for live Binance environment",
+        )
     if updates.get("factor_policy_enabled") and app_settings.binance_environment != "testnet":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "factor policy execution is limited to Binance testnet",
+        )
+    if updates.get("factor_policy_enabled") and not app_settings.historical_research_enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            HISTORICAL_RESEARCH_DISABLED_MESSAGE,
         )
     # The UI confirms this whole configuration change with the operator password.
     proposed_min_stop = updates.get("min_stop_atr", app_settings.min_stop_atr)
@@ -544,6 +619,7 @@ async def update_config(
                 "entry_direction",
                 "entry_trigger",
                 "entry_symbols",
+                "model_strategy_enabled",
                 "portfolio_strategy_enabled",
                 "manual_exit_levels_enabled",
                 "model_primary_portfolio_enabled",
@@ -851,7 +927,13 @@ async def create_replay(
     user: MutatingUser,
     repo: Repo,
     replays: Replays,
+    app_settings: AppSettings,
 ) -> dict[str, Any]:
+    if not app_settings.historical_research_enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            HISTORICAL_RESEARCH_DISABLED_MESSAGE,
+        )
     # JSON mode turns Decimal replay overrides into strings so the immutable
     # request snapshot can be safely stored in the JSON column.
     parameters = payload.model_dump(mode="json")
@@ -890,7 +972,13 @@ async def research_factors(
     research: FactorResearch,
     user: MutatingUser,
     repo: Repo,
+    app_settings: AppSettings,
 ) -> dict[str, Any]:
+    if not app_settings.historical_research_enabled:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            HISTORICAL_RESEARCH_DISABLED_MESSAGE,
+        )
     parameters = payload.model_dump(mode="json")
     run_id = await research.create(parameters)
     background_tasks.add_task(research.execute, run_id, parameters)
@@ -932,8 +1020,10 @@ async def factor_policy_status(
         **status_payload,
         "enabled": (
             app_settings.factor_policy_enabled
+            and app_settings.historical_research_enabled
             and app_settings.binance_environment == "testnet"
         ),
+        "historical_research_enabled": app_settings.historical_research_enabled,
         "environment": app_settings.binance_environment,
         "rank_weight": app_settings.factor_rank_weight,
         "minimum_risk_multiplier": app_settings.factor_min_risk_multiplier,

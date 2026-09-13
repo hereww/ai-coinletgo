@@ -324,13 +324,16 @@ class RiskLimits(BaseModel):
     manual_stop_atr: PositiveDecimal = Decimal("1.80")
     manual_take_profit_atr: PositiveDecimal = Decimal("5.00")
     model_primary_portfolio_enabled: bool = False
+    # Explicitly marks the deterministic testnet fallback so it can relax only
+    # the 15m opportunity trigger while retaining every other hard guard.
+    rule_based_strategy_enabled: bool = False
     # The runtime Settings object enables this by default on testnet.  Keep the
     # domain model fail-closed unless the environment-specific runtime value is
     # explicitly passed through to the risk compiler.
     strong_trend_entry_override_enabled: bool = False
     strong_trend_adx_min: NonNegativeDecimal = Decimal("30")
     min_confidence: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
-    min_net_reward_risk: PositiveDecimal = Decimal("2.0")
+    min_net_reward_risk: PositiveDecimal = Decimal("2.5")
     entry_direction: Literal["both", "long_only", "short_only"] = "both"
     entry_trigger: Literal["breakout_or_pullback", "breakout_only", "pullback_only"] = (
         "breakout_or_pullback"
@@ -341,7 +344,7 @@ class RiskLimits(BaseModel):
     elevated_volatility_risk_multiplier: PositiveDecimal = Decimal("0.75")
     high_volatility_risk_multiplier: PositiveDecimal = Decimal("0.50")
     portfolio_rebalance_deadband_fraction: Decimal = Field(
-        default=Decimal("0.10"), ge=0, le=1
+        default=Decimal("0.25"), ge=0, le=1
     )
 
     @model_validator(mode="after")

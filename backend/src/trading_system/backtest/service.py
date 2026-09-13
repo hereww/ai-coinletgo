@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from trading_system.backtest.engine import BacktestConfig, BacktestResult, SimPosition
 from trading_system.backtest.portfolio import PortfolioBacktestEngine
-from trading_system.config import Settings
+from trading_system.config import HISTORICAL_RESEARCH_DISABLED_MESSAGE, Settings
 from trading_system.domain.enums import PortfolioPlanActionType, PositionSide, SystemMode
 from trading_system.domain.models import (
     AccountState,
@@ -54,6 +54,7 @@ class ReplayService:
         self.portfolio_compiler = PortfolioCompiler()
 
     async def create(self, parameters: dict[str, object]) -> str:
+        self._require_historical_research()
         # Persist a complete config snapshot with the queued replay.  A replay
         # must keep its meaning even if the operator changes live settings
         # while the historical job is waiting in the background queue.
@@ -84,6 +85,7 @@ class ReplayService:
     async def run(self, replay_id: str, parameters: dict[str, object]) -> None:
         await self.repository.set_replay_running(replay_id)
         try:
+            self._require_historical_research()
             mode = str(parameters.get("mode", "deterministic"))
             if mode == "deterministic":
                 metrics = await self._run_deterministic(parameters)
@@ -96,6 +98,10 @@ class ReplayService:
         except Exception as error:
             await self.repository.fail_replay(replay_id, str(error)[:500])
             await self.notifier.send("历史回放失败", f"任务 {replay_id} 执行失败。")
+
+    def _require_historical_research(self) -> None:
+        if self.settings is not None and not self.settings.historical_research_enabled:
+            raise RuntimeError(HISTORICAL_RESEARCH_DISABLED_MESSAGE)
 
     async def _run_deterministic(
         self, parameters: dict[str, object]

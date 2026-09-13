@@ -28,8 +28,10 @@ docker compose -f docker-compose.server.yml up -d --build api worker
 客户端强制直连，避免部署环境的隐式代理改变交易链路。
 
 API 和 Worker 启动后会通过 Binance 公共 WebSocket 接收 ticker、bookTicker 和 mark price，
-用于实时行情、选币和下单前报价；账户、订单、过滤器、OI、历史 K 线和回放数据仍按需使用
-REST。历史 K 线、盘口深度和交易所元数据带有进程内缓存，避免每个扫描周期重复下载整套行情。
+用于实时行情、选币和下单前报价；账户、订单、过滤器、OI 和短周期交易 K 线仍按需使用
+REST。因子研究使用独立的 Binance 公共历史数据归档 `data.binance.vision` 下载月度/日度
+ZIP，不进入 Futures REST 限流预算；同一进程内的归档文件还会缓存并去重并发下载。盘口深度
+和交易所元数据带有进程内缓存，避免每个扫描周期重复下载整套行情。
 如果 Binance 已返回 `IP banned until ...`，请先停止会继续重试的旧容器，等待 Binance 返回的
 绝对时间到期后再用包含本次修复的镜像重启；WebSocket 不会解除已经生效的 REST IP 封禁。
 

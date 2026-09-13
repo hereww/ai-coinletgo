@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -9,7 +10,7 @@ import pytest
 from tests.factories import position
 from trading_system.config import Settings
 from trading_system.domain.enums import PositionSide
-from trading_system.domain.models import ExecutionIntent
+from trading_system.domain.models import Candle, ExecutionIntent
 from trading_system.exchange.base import ExchangeError, ExchangeUnknownStatusError
 from trading_system.exchange.binance import BinanceUSDMarketClient
 
@@ -47,6 +48,167 @@ def order_body(params: httpx.QueryParams, order_id: int) -> dict[str, object]:
         "stopPrice": params.get("stopPrice", "0"),
         "status": "FILLED" if params.get("type") == "MARKET" else "NEW",
     }
+
+
+def test_rate_limit_delay_respects_absolute_ban_deadline(monkeypatch) -> None:
+    monkeypatch.setattr("trading_system.exchange.binance.time.time", lambda: 1_000.0)
+
+    delay = BinanceUSDMarketClient._rate_limit_delay(
+        httpx.Response(418),
+        "IP banned until 8200000. Please use the websocket for live updates.",
+    )
+
+    assert delay == 7_205.0
+
+
+def test_rate_limit_delay_does_not_truncate_retry_after() -> None:
+    delay = BinanceUSDMarketClient._rate_limit_delay(
+        httpx.Response(429, headers={"Retry-After": "3600"}),
+        "Too many requests",
+    )
+
+    assert delay == 3_600.0
+
+
+@pytest.mark.asyncio
+async def test_kline_cache_refreshes_after_next_interval_close(tmp_path: object) -> None:
+    now = datetime.now(UTC)
+    cached = Candle(
+        open_time=now - timedelta(minutes=31),
+        close_time=now - timedelta(minutes=16),
+        open=Decimal("99"),
+        high=Decimal("101"),
+        low=Decimal("98"),
+        close=Decimal("100"),
+        volume=Decimal("10"),
+    )
+    refreshed_close = (now - timedelta(seconds=1)).replace(microsecond=0)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url.path == "/fapi/v1/klines"
+        return httpx.Response(
+            200,
+            json=[
+                [
+                    int((refreshed_close - timedelta(minutes=15)).timestamp() * 1000),
+                    "100",
+                    "102",
+                    "99",
+                    "101",
+                    "12",
+                    int(refreshed_close.timestamp() * 1000),
+                ]
+            ],
+        )
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    client._request_min_interval = 0
+    client._kline_cache[("BTCUSDT", "15m", 120)] = (time.monotonic(), [cached])
+    try:
+        candles = await client.get_klines("BTCUSDT", "15m", 120)
+    finally:
+        await client.close()
+
+    assert calls == 1
+    assert candles[-1].close_time == refreshed_close
+
+
+@pytest.mark.asyncio
+async def test_kline_cache_is_reused_before_next_interval_close(tmp_path: object) -> None:
+    now = datetime.now(UTC)
+    cached = Candle(
+        open_time=now - timedelta(minutes=20),
+        close_time=now - timedelta(minutes=5),
+        open=Decimal("99"),
+        high=Decimal("101"),
+        low=Decimal("98"),
+        close=Decimal("100"),
+        volume=Decimal("10"),
+    )
+    calls = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    client._request_min_interval = 0
+    client._kline_cache[("BTCUSDT", "15m", 120)] = (time.monotonic(), [cached])
+    try:
+        candles = await client.get_klines("BTCUSDT", "15m", 120)
+    finally:
+        await client.close()
+
+    assert calls == 0
+    assert candles == [cached]
+
+
+@pytest.mark.asyncio
+async def test_read_only_request_retries_transient_transport_failure(
+    tmp_path: object,
+) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("transient timeout", request=request)
+        return httpx.Response(200, json={"serverTime": 123})
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    client._request_min_interval = 0
+    try:
+        body = await client._request("GET", "/fapi/v1/time")
+    finally:
+        await client.close()
+
+    assert body == {"serverTime": 123}
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_pool_timeout_does_not_create_retry_pressure(tmp_path: object) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.PoolTimeout("local connection pool saturated", request=request)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    client._request_min_interval = 0
+    try:
+        with pytest.raises(ExchangeError, match="Binance request failed"):
+            await client._request("GET", "/fapi/v1/time")
+    finally:
+        await client.close()
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mutating_request_does_not_retry_transport_failure(tmp_path: object) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("ambiguous mutation", request=request)
+
+    client = BinanceUSDMarketClient(exchange_settings(tmp_path), httpx.MockTransport(handler))
+    client._request_min_interval = 0
+    try:
+        with pytest.raises(ExchangeError, match="Binance request failed"):
+            await client._request("POST", "/fapi/v1/order", signed=True)
+    finally:
+        await client.close()
+
+    assert calls == 1
 
 
 @pytest.mark.asyncio

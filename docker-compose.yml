@@ -37,6 +37,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://trading@postgres:5432/trading
       REDIS_URL: redis://redis:6379/0
       SECRET_DIR: /run/secrets
+      RUNTIME_SECRET_DIR: /run/runtime-secrets
+    volumes:
+      - ./runtime-secrets:/run/runtime-secrets
     secrets:
       - auth_password_hash
       - session_secret
@@ -70,6 +73,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://trading@postgres:5432/trading
       REDIS_URL: redis://redis:6379/0
       SECRET_DIR: /run/secrets
+      RUNTIME_SECRET_DIR: /run/runtime-secrets
+    volumes:
+      - ./runtime-secrets:/run/runtime-secrets
     secrets:
       - postgres_password
       - model_api_key

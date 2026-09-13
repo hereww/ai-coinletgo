@@ -30,7 +30,7 @@ def test_sizes_from_stop_distance_and_rounds_down() -> None:
     intent = engine.build_execution_intent(trade_signal, decision)
     assert intent.intent_id == trade_signal.signal_id
     assert intent.tp1_price == Decimal("101")
-    assert intent.tp2_price == Decimal("103")
+    assert intent.tp2_price == Decimal("106")
 
 
 def test_configured_leverage_can_reach_30_without_increasing_risk_amount() -> None:
@@ -55,6 +55,50 @@ def test_strong_uptrend_override_allows_long_without_15m_trigger() -> None:
     )
     assert decision.status == DecisionStatus.APPROVED
     assert "strong_trend_entry_override" in decision.reasons
+
+
+def test_rule_based_strategy_allows_trend_continuation_without_15m_trigger() -> None:
+    limits = context().limits.model_copy(
+        update={"rule_based_strategy_enabled": True, "strong_trend_adx_min": 30}
+    )
+    decision = RiskEngine().evaluate(
+        signal(risk_flags=["MODEL_DISABLED"]),
+        snapshot(breakout_15m=0, pullback_15m=0),
+        context(limits=limits),
+    )
+    assert decision.status == DecisionStatus.APPROVED
+    assert "local_trend_continuation" in decision.reasons
+
+    short_decision = RiskEngine().evaluate(
+        signal(
+            action="OPEN_SHORT",
+            risk_flags=["MODEL_DISABLED"],
+            invalidation_price=Decimal("101"),
+            target_price=Decimal("94"),
+        ),
+        snapshot(
+            trend_1h=-1,
+            trend_4h=-1,
+            breakout_15m=0,
+            pullback_15m=0,
+            adx_1h=Decimal("35"),
+        ),
+        context(limits=limits),
+    )
+    assert short_decision.status == DecisionStatus.APPROVED
+    assert "local_trend_continuation" in short_decision.reasons
+
+
+def test_rule_based_continuation_requires_local_signal_marker() -> None:
+    limits = context().limits.model_copy(update={"rule_based_strategy_enabled": True})
+    decision = RiskEngine().evaluate(
+        signal(),
+        snapshot(breakout_15m=0, pullback_15m=0),
+        context(limits=limits),
+    )
+
+    assert decision.status == DecisionStatus.REJECTED
+    assert "no_aligned_entry_trigger" in decision.reasons
 
 
 def test_model_primary_accepts_low_confidence_ranging_signal() -> None:

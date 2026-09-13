@@ -179,7 +179,7 @@ def test_model_primary_cannot_bypass_rebalance_cooldown() -> None:
         mark_price=Decimal("100"),
         stop_price=Decimal("98"),
         original_stop_price=Decimal("98"),
-        initial_risk_usdt=Decimal("1"),
+        initial_risk_usdt=Decimal("0.5"),
     )
     plan = PortfolioCompiler().compile(
         decision(

@@ -39,7 +39,7 @@ class AuditRepository:
 async def test_snapshot_failures_are_audited_per_symbol_and_stage() -> None:
     cycle = TradingCycle.__new__(TradingCycle)
     repository = AuditRepository()
-    cycle.exchange = FailingExchange()
+    cycle.market_exchange = FailingExchange()
     cycle.redis = MemoryRedis()
     cycle.repository = repository
     universe = [

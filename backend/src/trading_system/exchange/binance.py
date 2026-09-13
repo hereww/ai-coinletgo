@@ -6,7 +6,7 @@ import hmac
 import logging
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any
 from urllib.parse import urlencode
@@ -50,13 +50,18 @@ class BinanceUSDMarketClient(ExchangeGateway):
         self.api_secret = "" if public_base_url else settings.binance_api_secret or ""
         self.base_url = (public_base_url or settings.binance_base_url).rstrip("/")
         self.time_offset_ms = 0
+        public_market_client = public_base_url is not None
         self.http = httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=15,
+            timeout=httpx.Timeout(15, pool=30),
             transport=transport,
             headers={"X-MBX-APIKEY": self.api_key},
             proxy=settings.binance_http_proxy_url if proxy_url is None else proxy_url,
             trust_env=False,
+            limits=httpx.Limits(
+                max_connections=10 if public_market_client else 20,
+                max_keepalive_connections=10 if public_market_client else 20,
+            ),
         )
         self._filter_cache: dict[str, ExchangeFilters] = {}
         self._leverage_cache: dict[str, int] = {}
@@ -702,12 +707,16 @@ class BinanceUSDMarketClient(ExchangeGateway):
         cache_ttl = {"15m": 10 * 60, "1h": 45 * 60, "4h": 3 * 60 * 60}.get(interval, 60)
         cached = self._kline_cache.get(cache_key)
         now_monotonic = time.monotonic()
-        if cached is not None and now_monotonic - cached[0] < cache_ttl:
+        now = datetime.now(UTC)
+        if (
+            cached is not None
+            and now_monotonic - cached[0] < cache_ttl
+            and self._kline_cache_covers_current_interval(cached[1], interval, now)
+        ):
             return [item.model_copy(deep=True) for item in cached[1]]
         rows = await self._request(
             "GET", "/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit}
         )
-        now = datetime.now(UTC)
         candles = [
             Candle(
                 open_time=datetime.fromtimestamp(row[0] / 1000, tz=UTC),
@@ -726,6 +735,21 @@ class BinanceUSDMarketClient(ExchangeGateway):
             [item.model_copy(deep=True) for item in candles],
         )
         return candles
+
+    @staticmethod
+    def _kline_cache_covers_current_interval(
+        candles: list[Candle], interval: str, now: datetime
+    ) -> bool:
+        if not candles:
+            return False
+        match = re.fullmatch(r"(\d+)([mhd])", interval)
+        if match is None:
+            return True
+        value = int(match.group(1))
+        seconds_per_unit = {"m": 60, "h": 3_600, "d": 86_400}
+        interval_seconds = value * seconds_per_unit[match.group(2)]
+        next_close = candles[-1].close_time + timedelta(seconds=interval_seconds)
+        return now <= next_close + timedelta(seconds=5)
 
     async def get_historical_klines(
         self, symbol: str, interval: str, start_ms: int, end_ms: int
@@ -1995,6 +2019,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
         *,
         signed: bool = False,
         _retry_time_sync: int = 2,
+        _retry_network: int = 1,
     ) -> Any:
         await self._request_gate_wait()
         if self.settings.binance_proxy_enabled and not self.settings.binance_http_proxy_configured:
@@ -2011,7 +2036,38 @@ class BinanceUSDMarketClient(ExchangeGateway):
             ).hexdigest()
         try:
             response = await self.http.request(method, path, params=values)
-        except httpx.HTTPError:
+        except httpx.HTTPError as error:
+            # Retrying mutations after a transport failure can duplicate an
+            # order whose response was lost. Read-only requests are safe to
+            # retry, and rebuilding the request refreshes signed timestamps.
+            if (
+                method.upper() == "GET"
+                and _retry_network > 0
+                and not isinstance(error, httpx.PoolTimeout)
+            ):
+                delay = 0.75
+                logger.warning(
+                    "Binance GET transport failure; retrying path=%s "
+                    "retries_remaining=%d error_type=%s",
+                    path,
+                    _retry_network,
+                    type(error).__name__,
+                )
+                await asyncio.sleep(delay)
+                return await self._request(
+                    method,
+                    path,
+                    params,
+                    signed=signed,
+                    _retry_time_sync=_retry_time_sync,
+                    _retry_network=_retry_network - 1,
+                )
+            logger.warning(
+                "Binance request transport failure path=%s method=%s error_type=%s",
+                path,
+                method.upper(),
+                type(error).__name__,
+            )
             detail = (
                 "Binance request failed through HTTP proxy"
                 if self.settings.binance_http_proxy_configured
@@ -2049,6 +2105,7 @@ class BinanceUSDMarketClient(ExchangeGateway):
                     params,
                     signed=signed,
                     _retry_time_sync=_retry_time_sync - 1,
+                    _retry_network=_retry_network,
                 )
             raise ExchangeError(
                 f"{response.status_code} [{code}]: {detail}",
@@ -2096,13 +2153,21 @@ class BinanceUSDMarketClient(ExchangeGateway):
         match = re.search(r"banned until (\d+)", detail, flags=re.IGNORECASE)
         if match:
             try:
-                return min(max((int(match.group(1)) / 1000) - time.time(), 5.0), 900.0)
+                # Binance can issue bans longer than 15 minutes. Truncating
+                # the absolute deadline made the protection loop probe the
+                # endpoint early on every cooldown and repeatedly receive
+                # another 418. Stay quiet until the server-provided deadline,
+                # with a small boundary buffer for clock and network skew.
+                return max(
+                    (int(match.group(1)) / 1000) - time.time() + 5.0,
+                    5.0,
+                )
             except ValueError:
                 pass
         raw_retry_after = response.headers.get("Retry-After")
         if raw_retry_after:
             try:
-                return min(max(float(raw_retry_after), 5.0), 900.0)
+                return max(float(raw_retry_after), 5.0)
             except ValueError:
                 pass
         return 60.0

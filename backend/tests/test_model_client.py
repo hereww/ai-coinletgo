@@ -26,6 +26,7 @@ def model_settings(tmp_path: object) -> Settings:
         model_base_url="https://model.example",
         portfolio_strategy_enabled=False,
         manual_exit_levels_enabled=False,
+        model_primary_portfolio_enabled=True,
     )
 
 
@@ -93,6 +94,11 @@ async def test_valid_structured_response_and_sanitized_payload(tmp_path: object)
     assert "ctc_" not in payload_text
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
     assert "Selected strategy profile: trend_following" in system_text
+    assert "不适用" not in system_text
+    assert (
+        "Do not return an empty signal list solely because breakout_15m and "
+        "pullback_15m are both 0"
+    ) in system_text
 
 
 @pytest.mark.asyncio
@@ -125,7 +131,7 @@ async def test_portfolio_prompt_keeps_hard_risk_contract_explicit_in_model_prima
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
     assert "趋势、ADX、15分钟触发" in system_text
     assert "最低净盈亏比仍是本地硬限制" in system_text
-    assert "最低净盈亏比为" not in system_text
+    assert "所有 LONG/SHORT 目标必须满足 2.5R" in system_text
     assert "本地硬风控" in system_text
     assert "所有结果继续接受本地硬风控" in system_text
     assert "entry_range_min_width_abs" in system_text
@@ -163,7 +169,7 @@ async def test_portfolio_prompt_uses_runtime_reward_risk_floor(tmp_path: object)
         await client.close()
 
     system_text = captured[0]["input"][0]["content"][0]["text"]  # type: ignore[index]
-    assert "输出目标必须满足 1.8R" in system_text
+    assert "所有 LONG/SHORT 目标必须满足 1.8R" in system_text
     context = json.loads(captured[0]["input"][1]["content"][0]["text"])  # type: ignore[index]
     assert context["entry_policy"]["min_net_reward_risk"] == 1.8
 
@@ -207,17 +213,17 @@ async def test_portfolio_strong_uptrend_keeps_minimum_reward_risk_contract(
     settings.min_net_reward_risk = 3
     client = ResponsesModelClient(settings, transport=httpx.MockTransport(handler))
     try:
-        result = await client.analyze_portfolio(
-            [snapshot(breakout_15m=0, pullback_15m=0)], [], expires_at
-        )
+        with pytest.raises(
+            ModelUnavailableError,
+            match="market_contract:BTCUSDT:net_reward_risk_below_minimum",
+        ):
+            await client.analyze_portfolio(
+                [snapshot(breakout_15m=0, pullback_15m=0)], [], expires_at
+            )
     finally:
         await client.close()
 
-    assert calls == 1
-    assert result.allocations[0].confidence == Decimal("0.1")
-    assert result.allocations[0].entry_min == Decimal("99.9")
-    assert result.allocations[0].entry_max == Decimal("100.1")
-    assert "STRONG_TREND_ENTRY_OVERRIDE" in result.allocations[0].reason_codes
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -240,7 +246,7 @@ async def test_model_primary_portfolio_contract_accepts_valid_ranging_opportunit
                     "entry_min": "99.9",
                     "entry_max": "100.1",
                     "stop_price": "99",
-                    "target_price": "100.2",
+                    "target_price": "104.2",
                     "thesis": "震荡区间内出现短线向上机会",
                     "reason_codes": ["NO_15M_TRIGGER"],
                     "risk_flags": [],
@@ -298,7 +304,7 @@ async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
                 "entry_min": "# 99.8",
                 "entry_max": "# 100.2",
                 "stop_price": "# 98.8",
-                "target_price": "# 104.0",
+                "target_price": "# 105.0",
                 "thesis": "多头趋势延续",
                 "reason_codes": [],
                 "risk_flags": [],
@@ -319,7 +325,7 @@ async def test_portfolio_numeric_markdown_markers_are_normalized_without_repair(
     assert allocation.entry_min == Decimal("99.8")
     assert allocation.entry_max == Decimal("100.2")
     assert allocation.stop_price == Decimal("98.8")
-    assert allocation.target_price == Decimal("104.0")
+    assert allocation.target_price == Decimal("105.0")
 
 
 @pytest.mark.asyncio
@@ -599,7 +605,7 @@ async def test_portfolio_market_contract_repairs_one_spread_entry_range(
                 "entry_min": "0.082880",
                 "entry_max": "0.082900",
                 "stop_price": "0.083590",
-                "target_price": "0.081000",
+                "target_price": "0.080500",
                 "thesis": "高周期空头趋势延续",
                 "reason_codes": ["TREND_ALIGNED"],
                 "risk_flags": [],
@@ -835,7 +841,7 @@ async def test_portfolio_short_geometry_is_repaired_instead_of_reaching_compiler
             {
                 **invalid["allocations"][0],
                 "stop_price": "0.0413",
-                "target_price": "0.0368",
+                "target_price": "0.0358",
                 "thesis": "空头止损高于入场区间，目标低于入场区间",
             }
         ],
@@ -1083,10 +1089,12 @@ async def test_relay_http_errors_keep_provider_code_and_message(tmp_path: object
 @pytest.mark.asyncio
 async def test_invalid_json_repairs_once(tmp_path: object) -> None:
     calls = 0
+    captured: list[dict[str, object]] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        captured.append(json.loads(request.content))
         if calls == 1:
             return httpx.Response(200, json={"output_text": "not-json"})
         return httpx.Response(200, json={"output_text": json.dumps(valid_output())})
@@ -1098,6 +1106,9 @@ async def test_invalid_json_repairs_once(tmp_path: object) -> None:
         await client.close()
     assert result.summary == "No trade"
     assert calls == 2
+    repair_text = captured[1]["input"][-1]["content"][0]["text"]  # type: ignore[index]
+    assert "Validation error: invalid_json" in repair_text
+    assert "return no signal instead of inventing prices" in repair_text
 
 
 @pytest.mark.asyncio

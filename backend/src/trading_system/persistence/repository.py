@@ -61,6 +61,7 @@ REASON_LABELS_ZH: dict[str, str] = {
     "atr_invalid": "ATR无效，无法计算止损距离",
     "trend_not_aligned": "1小时与4小时趋势未对齐",
     "no_aligned_entry_trigger": "没有符合策略的入场触发",
+    "local_trend_continuation": "模型关闭后的本地趋势延续放行（仍需全部硬风控）",
     "strong_trend_entry_override": "强劲上升趋势策略放行（仅保留硬资金安全检查）",
     "model_returned_no_trade": "模型判断暂不交易",
     "signal_expired": "信号已过期",

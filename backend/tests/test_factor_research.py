@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 import pytest
 
 from tests.factories import snapshot
 from trading_system.domain.models import Candle
+from trading_system.exchange.binance_historical import BinanceHistoricalDataClient
+from trading_system.persistence.repository import Repository
 from trading_system.strategy.factor_policy import (
     build_factor_overlays,
     build_window_payload,
@@ -23,7 +26,24 @@ from trading_system.strategy.factor_research import (
     run_factor_research,
     spearman_rank_ic,
 )
+from trading_system.strategy.factor_service import FactorResearchService
 from trading_system.strategy.factors import FactorBar, compute_factor_values
+
+
+@pytest.mark.asyncio
+async def test_factor_research_service_fails_closed_when_disabled() -> None:
+    class RejectingRepository:
+        async def create_factor_research_run(self, parameters: dict[str, object]) -> str:
+            raise AssertionError(f"repository should not be called: {parameters}")
+
+    service = FactorResearchService(
+        cast(Repository, RejectingRepository()),
+        cast(BinanceHistoricalDataClient, object()),
+        "Asia/Shanghai",
+    )
+
+    with pytest.raises(RuntimeError, match="历史研究已暂停"):
+        await service.create({"symbols": ["BTCUSDT"]})
 
 
 def factor_bar(

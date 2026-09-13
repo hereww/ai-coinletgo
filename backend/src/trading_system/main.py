@@ -15,6 +15,7 @@ from trading_system.api.security import SecurityService
 from trading_system.backtest.service import ReplayService
 from trading_system.config import get_settings
 from trading_system.exchange.binance import BinanceUSDMarketClient
+from trading_system.exchange.binance_historical import BinanceHistoricalDataClient
 from trading_system.exchange.market_stream import BinancePublicMarketCache
 from trading_system.notifications.telegram import TelegramNotifier
 from trading_system.persistence.database import Database
@@ -34,7 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.app_env != "production":
         await database.create_schema()
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
-    repository = Repository(database)
+    repository = Repository(database, settings.app_timezone)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
     market_stream = BinancePublicMarketCache(
@@ -53,11 +54,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # shared outbound proxy even when signed trading requests stay direct.
         proxy_url=settings.http_proxy_url,
     )
+    factor_data = BinanceHistoricalDataClient(
+        settings,
+        proxy_url=settings.http_proxy_url,
+    )
     model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
     replay_service = ReplayService(repository, research_exchange, notifier, settings)
     factor_research_service = FactorResearchService(
-        repository, research_exchange, settings.app_timezone
+        repository,
+        factor_data,
+        settings.app_timezone,
+        enabled=settings.historical_research_enabled,
     )
     controller = SystemController(settings, database, redis, repository, exchange, model)
 
@@ -73,12 +81,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.notifier = notifier
     app.state.replay_service = replay_service
     app.state.factor_research_service = factor_research_service
+    app.state.factor_data = factor_data
     yield
 
     await model.close()
     await notifier.close()
     await market_stream.close()
     await research_exchange.close()
+    await factor_data.close()
     await exchange.close()
     await redis.aclose()
     await database.dispose()

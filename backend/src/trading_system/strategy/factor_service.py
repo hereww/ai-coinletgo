@@ -7,7 +7,8 @@ from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from trading_system.exchange.binance import BinanceUSDMarketClient
+from trading_system.config import HISTORICAL_RESEARCH_DISABLED_MESSAGE
+from trading_system.exchange.binance_historical import BinanceHistoricalDataClient
 from trading_system.persistence.repository import Repository
 from trading_system.strategy.factor_research import (
     align_funding_point_in_time,
@@ -20,14 +21,14 @@ DATA_SOURCES: list[dict[str, object]] = [
         "key": "price",
         "label": "价格K线",
         "available": True,
-        "detail": "Binance USD-M 历史K线，按收盘时间使用",
+        "detail": "Binance USD-M 公共历史归档K线，按收盘时间使用，不占 Futures REST 配额",
     },
     {"key": "volume", "label": "成交量", "available": True, "detail": "来自同一历史K线"},
     {
         "key": "funding",
         "label": "资金费率",
         "available": True,
-        "detail": "仅向前对齐已发生的资金费率事件",
+        "detail": "公共历史归档资金费率，仅向前对齐已发生的事件",
     },
     {
         "key": "open_interest",
@@ -54,51 +55,62 @@ class FactorResearchService:
     def __init__(
         self,
         repository: Repository,
-        exchange: BinanceUSDMarketClient,
+        exchange: BinanceHistoricalDataClient,
         timezone_name: str,
+        *,
+        enabled: bool = False,
     ) -> None:
         self.repository = repository
         self.exchange = exchange
         self.timezone_name = timezone_name
+        self.enabled = enabled
+        self._run_semaphore = asyncio.Semaphore(1)
 
     def catalog(self) -> dict[str, object]:
         return {
             "factors": factor_definitions_payload(),
             "data_sources": DATA_SOURCES,
-            "market_source": "Binance USD-M production public market data",
+            "market_source": "Binance USD-M public data archive (data.binance.vision)",
             "live_trading_connected": False,
+            "historical_research_enabled": self.enabled,
         }
 
     async def create(self, parameters: dict[str, object]) -> str:
+        self._require_enabled()
         return await self.repository.create_factor_research_run(parameters)
 
+    def _require_enabled(self) -> None:
+        if not self.enabled:
+            raise RuntimeError(HISTORICAL_RESEARCH_DISABLED_MESSAGE)
+
     async def execute(self, run_id: str, parameters: dict[str, object]) -> None:
-        await self.repository.set_factor_research_running(run_id)
-        try:
-            raw_symbols = parameters["symbols"]
-            if not isinstance(raw_symbols, Sequence) or isinstance(raw_symbols, str):
-                raise ValueError("factor research symbols must be a list")
-            report = await self.run(
-                symbols=[str(item) for item in raw_symbols],
-                start_date=date.fromisoformat(str(parameters["start_date"])),
-                end_date=date.fromisoformat(str(parameters["end_date"])),
-                interval=str(parameters["interval"]),
-                forward_bars=int(str(parameters["forward_bars"])),
-                rebalance_bars=int(str(parameters["rebalance_bars"])),
-                winsorize_quantile=Decimal(str(parameters["winsorize_quantile"])),
-                min_cross_section=int(str(parameters["min_cross_section"])),
-                maker_fee_rate=Decimal(str(parameters.get("maker_fee_rate", "0.0002"))),
-                taker_fee_rate=Decimal(str(parameters.get("taker_fee_rate", "0.0005"))),
-                slippage_rate=Decimal(str(parameters.get("slippage_rate", "0.0005"))),
-                funding_rate_fallback=Decimal(
-                    str(parameters.get("funding_rate_fallback", "0.0001"))
-                ),
-                walk_forward_folds=int(str(parameters.get("walk_forward_folds", 4))),
-                portfolio_quantile=Decimal(str(parameters.get("portfolio_quantile", "0.2"))),
-            )
-            await self.repository.complete_factor_research(run_id, report)
-        except Exception as error:
-            await self.repository.fail_factor_research(run_id, str(error)[:500])
+        async with self._run_semaphore:
+            await self.repository.set_factor_research_running(run_id)
+            try:
+                raw_symbols = parameters["symbols"]
+                if not isinstance(raw_symbols, Sequence) or isinstance(raw_symbols, str):
+                    raise ValueError("factor research symbols must be a list")
+                report = await self.run(
+                    symbols=[str(item) for item in raw_symbols],
+                    start_date=date.fromisoformat(str(parameters["start_date"])),
+                    end_date=date.fromisoformat(str(parameters["end_date"])),
+                    interval=str(parameters["interval"]),
+                    forward_bars=int(str(parameters["forward_bars"])),
+                    rebalance_bars=int(str(parameters["rebalance_bars"])),
+                    winsorize_quantile=Decimal(str(parameters["winsorize_quantile"])),
+                    min_cross_section=int(str(parameters["min_cross_section"])),
+                    maker_fee_rate=Decimal(str(parameters.get("maker_fee_rate", "0.0002"))),
+                    taker_fee_rate=Decimal(str(parameters.get("taker_fee_rate", "0.0005"))),
+                    slippage_rate=Decimal(str(parameters.get("slippage_rate", "0.0005"))),
+                    funding_rate_fallback=Decimal(
+                        str(parameters.get("funding_rate_fallback", "0.0001"))
+                    ),
+                    walk_forward_folds=int(str(parameters.get("walk_forward_folds", 4))),
+                    portfolio_quantile=Decimal(str(parameters.get("portfolio_quantile", "0.2"))),
+                )
+                await self.repository.complete_factor_research(run_id, report)
+            except Exception as error:
+                await self.repository.fail_factor_research(run_id, str(error)[:500])
 
     async def run(
         self,
@@ -118,6 +130,7 @@ class FactorResearchService:
         walk_forward_folds: int = 4,
         portfolio_quantile: Decimal = Decimal("0.2"),
     ) -> dict[str, Any]:
+        self._require_enabled()
         bars_per_day_by_interval = {"1h": 24, "4h": 6}
         if interval not in bars_per_day_by_interval:
             raise ValueError("unsupported factor interval")
@@ -190,6 +203,6 @@ class FactorResearchService:
             "portfolio_quantile": str(Decimal(str(portfolio_quantile))),
         }
         report["data_sources"] = DATA_SOURCES
-        report["market_source"] = "Binance USD-M production public market data"
+        report["market_source"] = "Binance USD-M public data archive (data.binance.vision)"
         report["live_trading_connected"] = False
         return report

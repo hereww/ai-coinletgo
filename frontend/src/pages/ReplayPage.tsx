@@ -86,6 +86,7 @@ export default function ReplayPage() {
   const eligibleFactorRuns = (factorRuns.data ?? []).filter((run) =>
     run.status === 'COMPLETED' && 'summary' in run.report && Number(run.report.summary.passed) > 0,
   )
+  const historicalResearchEnabled = config.data?.historical_research_enabled ?? false
 
   return <>
     <PageHeader title="历史回放" subtitle="可重复的本地策略回放与 Portfolio-v1 决策复现 · 北京时间" />
@@ -126,8 +127,9 @@ export default function ReplayPage() {
           {!decisions.isLoading && !(decisions.data ?? []).length ? <p className="inline-error">暂无可复现的组合决策。需要先由 Portfolio-v1 保存一轮决策。</p> : null}
         </>}
         {replay.error ? <div className="inline-error">{replay.error.message}</div> : null}
-        <Button type="submit" variant="primary" icon={<Play size={15} />} disabled={replay.isPending || (mode === 'recorded_portfolio' && !decisionId)}>
-          {replay.isPending ? '正在创建...' : '开始回放'}
+        {!historicalResearchEnabled ? <p className="setup-note">历史回放已暂停，当前仅保留模型驱动的测试网自动交易。</p> : null}
+        <Button type="submit" variant="primary" icon={<Play size={15} />} disabled={!historicalResearchEnabled || replay.isPending || (mode === 'recorded_portfolio' && !decisionId)}>
+          {!historicalResearchEnabled ? '历史回放已暂停' : replay.isPending ? '正在创建...' : '开始回放'}
         </Button>
       </form>
       <div className="replay-summary">

@@ -10,6 +10,7 @@ const apiMock = vi.hoisted(() => ({
   probeIntegration: vi.fn(),
   selectModelProfile: vi.fn(),
   updateModelIntegration: vi.fn(),
+  updateModelProfile: vi.fn(),
 }))
 
 vi.mock('../api/client', () => ({ api: apiMock }))
@@ -65,6 +66,7 @@ beforeEach(() => {
   apiMock.probeIntegration.mockResolvedValue({ name: 'binance', state: 'NOT_CONFIGURED', detail: 'missing' })
   apiMock.selectModelProfile.mockResolvedValue({})
   apiMock.updateModelIntegration.mockResolvedValue({})
+  apiMock.updateModelProfile.mockResolvedValue({})
 })
 
 it('shows testnet and model integration state and runs a non-ordering testnet probe', async () => {
@@ -86,13 +88,33 @@ it('saves model settings directly without an extra confirmation dialog', async (
   const baseUrl = await screen.findByLabelText('OpenAI 中转 Base URL')
   fireEvent.change(baseUrl, { target: { value: 'https://relay.example.com/v1' } })
   fireEvent.change(screen.getByLabelText('AI 策略模板'), { target: { value: 'balanced' } })
-  fireEvent.click(screen.getByRole('button', { name: '保存策略与中转设置' }))
-  await waitFor(() => expect(apiMock.updateModelIntegration).toHaveBeenCalledWith(expect.objectContaining({
+  fireEvent.click(screen.getByRole('button', { name: '保存中转设置' }))
+  await waitFor(() => expect(apiMock.updateModelProfile).toHaveBeenCalledWith(expect.objectContaining({
+    profile_id: 'relay',
     base_url: 'https://relay.example.com/v1',
     model_name: 'gpt-5.6',
     strategy_profile: 'balanced',
   })))
-  expect(apiMock.updateModelIntegration.mock.calls[0][0]).not.toHaveProperty('api_key')
+  expect(apiMock.updateModelProfile.mock.calls[0][0]).not.toHaveProperty('api_key')
+})
+
+it('edits the self-hosted vLLM endpoint, model, key, reasoning and strategy', async () => {
+  renderPage()
+  fireEvent.change(await screen.findByLabelText('编辑模型'), { target: { value: 'vllm' } })
+  fireEvent.change(await screen.findByLabelText('自建 vLLM 接口地址'), { target: { value: 'http://vllm.internal:8000/v1' } })
+  fireEvent.change(screen.getByLabelText('自建 vLLM 模型'), { target: { value: 'Qwen/Qwen3.8-27B-FP8' } })
+  fireEvent.change(screen.getByLabelText('自建 vLLM API Key'), { target: { value: 'vllm-secret' } })
+  fireEvent.change(screen.getByLabelText('推理强度'), { target: { value: 'high' } })
+  fireEvent.change(screen.getByLabelText('AI 策略模板'), { target: { value: 'balanced' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存自建 vLLM设置' }))
+  await waitFor(() => expect(apiMock.updateModelProfile).toHaveBeenCalledWith(expect.objectContaining({
+    profile_id: 'vllm',
+    base_url: 'http://vllm.internal:8000/v1',
+    model_name: 'Qwen/Qwen3.8-27B-FP8',
+    api_key: 'vllm-secret',
+    reasoning_effort: 'high',
+    strategy_profile: 'balanced',
+  })))
 })
 
 it('switches to a configured model profile without sending an api key', async () => {

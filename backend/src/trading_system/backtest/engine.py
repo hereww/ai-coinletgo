@@ -74,7 +74,7 @@ class BacktestConfig:
     entry_direction: str = "both"
     entry_trigger: str = "breakout_or_pullback"
     min_confidence: Decimal = Decimal("0.75")
-    min_net_reward_risk: Decimal = Decimal("2.0")
+    min_net_reward_risk: Decimal = Decimal("2.5")
     min_stop_atr: Decimal = Decimal("0.80")
     max_stop_atr: Decimal = Decimal("2.50")
     manual_exit_levels_enabled: bool = False

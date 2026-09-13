@@ -145,6 +145,7 @@ export default function FactorResearchPage() {
   const runPending = awaitingActiveRun || activeRun?.status === 'QUEUED' || activeRun?.status === 'RUNNING'
   const runError = failedRunMessage(activeRun)
   const sources = result?.data_sources ?? catalog.data?.data_sources ?? []
+  const historicalResearchEnabled = catalog.data?.historical_research_enabled ?? false
 
   return <div className="factor-page">
     <PageHeader
@@ -219,6 +220,10 @@ export default function FactorResearchPage() {
           {research.error ? <div className="inline-error" role="alert">{research.error.message}</div> : null}
           {runs.error ? <div className="inline-error" role="alert">{runs.error.message}</div> : null}
           {runError ? <div className="inline-error" role="alert">{runError}</div> : null}
+          {!historicalResearchEnabled ? <div className="factor-run-state">
+            <AlertTriangle size={15} />
+            <div><strong>历史研究已暂停</strong><small>当前仅保留模型驱动的测试网自动交易</small></div>
+          </div> : null}
           {awaitingActiveRun ? <div className="factor-run-state queued">
             <LoaderCircle className="spin" size={15} />
             <div><strong>{runStatusLabels.QUEUED}</strong><small>正在同步任务状态</small></div>
@@ -230,9 +235,9 @@ export default function FactorResearchPage() {
             type="submit"
             variant="primary"
             icon={research.isPending || runPending ? <LoaderCircle className="spin" size={15} /> : <FlaskConical size={15} />}
-            disabled={research.isPending || runPending}
+            disabled={!historicalResearchEnabled || research.isPending || runPending}
           >
-            {research.isPending ? '正在创建任务...' : runPending ? '研究任务运行中' : '运行因子研究'}
+            {!historicalResearchEnabled ? '历史研究已暂停' : research.isPending ? '正在创建任务...' : runPending ? '研究任务运行中' : '运行因子研究'}
           </Button>
         </div>
       </form>

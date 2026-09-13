@@ -87,7 +87,8 @@ STRATEGY_PROFILE_GUIDANCE = {
     ),
     "trend_following": (
         "Prioritize sustained 1h/4h directional moves with a 15m continuation trigger; "
-        "avoid counter-trend reversals and chase entries."
+        "avoid counter-trend reversals and chase entries. The minimum net reward/risk "
+        "after costs remains a local hard limit in every mode."
     ),
     "scalping": (
         "Use the 15m trigger for shorter horizons, but still require non-conflicting 1h/4h "
@@ -249,9 +250,9 @@ portfolio_risk_budget_fraction 和 allocation_fraction 都必须在 0 到 1 之�
 如果只允许使用一半，输出 0.5，不能把 0.75% 写成 0.0075。
 任何 target_side 为 LONG 或 SHORT 的分配都必须填写绝对价格的 entry_min、entry_max、
 stop_price、target_price，四个字段均不得为 null；价格关系必须满足多头 stop < entry < target，
-空头 target < entry < stop。止损距离必须落在输入的 ATR 安全范围内；当
-entry_policy.model_primary_enabled 为 true 时，净盈亏比只作为模型判断证据，不是把有效机会
-强制改成 FLAT 的本地门槛；关闭模型主导模式时才必须满足配置的最低净盈亏比。
+空头 target < entry < stop。止损距离必须落在输入的 ATR 安全范围内。最低净盈亏比始终是
+本地硬限制，任何 LONG/SHORT 目标都必须满足扣除成本后的最低净盈亏比；模型主导模式只会
+放宽趋势、ADX、15分钟触发和置信度等机会证据门槛。
 对新开仓候选，entry_min <= entry_range_reference_price <= entry_max，且
 entry_max - entry_min 必须不小于该候选的 entry_range_min_width_abs。这个最小宽度用于吸收
 模型推理和交易所请求期间的正常报价变化；不得只把当时的 best_bid、best_ask 原样复制成入场区间。
@@ -279,11 +280,12 @@ portfolio_risk_budget_fraction 覆盖本周期全部目标风险，包括已有�
 “继续持有”或“不增加仓位”时，对应已有仓位不得输出 FLAT。
 候选列表包含经过基础流动性与数据完整性筛选的观察名单。若
 entry_policy.model_primary_enabled 为 true，模型负责机会、方向、是否开仓和目标风险份额；
-1小时/4小时趋势、market_regime、ADX、15分钟突破或回踩、置信度、最低净盈亏比、同向仓位和
-相关性都是决策证据，不是本地否决条件。即使行情是 RANGING、VOLATILE 或 UNCERTAIN，或没有
-15分钟触发，只要综合分析认为值得交易，也可以输出 LONG/SHORT；但不得伪造趋势或触发事实，
-必须给出完整有效的入场、止损、止盈几何。若 model_primary_enabled 为 false，则必须遵守配置的
-趋势、ADX、15分钟触发、置信度和最低净盈亏比机会门槛。
+1小时/4小时趋势、market_regime、ADX、15分钟突破或回踩、置信度、同向仓位和相关性都是
+决策证据，不是本地否决条件。最低净盈亏比始终是本地硬限制，任何 LONG/SHORT 目标都必须
+满足扣除成本后的最低净盈亏比。即使行情是 RANGING、VOLATILE 或 UNCERTAIN，或没有15分钟
+触发，只要综合分析认为值得交易，也可以输出 LONG/SHORT；但不得伪造趋势或触发事实，必须
+给出完整有效的入场、止损、止盈几何。若 model_primary_enabled 为 false，则必须额外遵守
+配置的趋势、ADX、15分钟触发和置信度机会门槛。
 无论哪种模式，本地硬风控都会强制执行止损 ATR 安全范围、组合风险预算、保证金、总仓位数、可用余额、
 交易所规则、系统模式与亏损/回撤熔断；5分钟周期内对已有仓位 ADD 仍受调仓冷却约束，防止连续
 追仓。volatility_risk_multiplier 由本地系统计算并用于缩放风险份额，模型不得修改、补偿或通过
@@ -434,7 +436,11 @@ class ResponsesModelClient:
                         {
                             "type": "input_text",
                             "text": (
-                                "Previous output failed schema validation. Return valid JSON only."
+                                "Previous output failed local validation. Return the complete "
+                                "corrected JSON only, without explanation. "
+                                f"Validation error: {self._schema_failure_detail(first_error)}. "
+                                "If no trade can satisfy the supplied market contract and hard "
+                                "risk limits, return no signal instead of inventing prices."
                             ),
                         }
                     ],
@@ -850,6 +856,17 @@ class ResponsesModelClient:
             },
             separators=(",", ":"),
         )
+        selected_profile_guidance = STRATEGY_PROFILE_GUIDANCE[self.settings.strategy_profile]
+        if self.settings.model_primary_portfolio_enabled:
+            selected_profile_guidance = (
+                "Model-primary testnet mode takes precedence over the selected profile's "
+                "opportunity-evidence preferences. Use the profile only to rank and prefer "
+                "setups; do not require aligned trend, minimum ADX, minimum confidence, or a "
+                "15m breakout/pullback before considering a market-safe candidate. Do not return "
+                "an empty signal list solely because breakout_15m and pullback_15m are both 0. "
+                "Only return no trade when the combined evidence is not attractive or a hard "
+                "risk/price/liquidity constraint prevents a valid target."
+            )
         payload: dict[str, Any] = {
             "model": self.settings.active_model_name,
             # Keep every relay call stateless. Some OpenAI-compatible relays
@@ -866,14 +883,15 @@ class ResponsesModelClient:
                             "text": (
                                 f"{SYSTEM_PROMPT}\n\nSelected strategy profile: "
                                 f"{self.settings.strategy_profile}. "
-                                f"{STRATEGY_PROFILE_GUIDANCE[self.settings.strategy_profile]}\n"
+                                f"{selected_profile_guidance}\n"
                                 f"{CHINESE_OUTPUT_REQUIREMENT}\n"
                                 + (
                                     "Testnet model-primary mode is enabled. Treat trend, ADX, "
-                                    "15m trigger, confidence, reward/risk, same-direction and "
-                                    "correlation values as decision evidence, not local vetoes. "
-                                    "最低净盈亏比为 "
-                                    f"{self.settings.min_net_reward_risk:g}R（仅作参考，不是本地否决条件）。\n"
+                                    "15m trigger, confidence, same-direction and correlation "
+                                    "values as decision evidence, not local vetoes. The minimum "
+                                    "net reward/risk remains a local hard limit: every directional "
+                                    "target must satisfy "
+                                    f"{self.settings.min_net_reward_risk:g}R after costs.\n"
                                     if self.settings.model_primary_portfolio_enabled
                                     else "The configured minimum net reward/risk after costs is "
                                     f"{self.settings.min_net_reward_risk:g}R. Leave a buffer above "
@@ -1029,9 +1047,9 @@ class ResponsesModelClient:
                                 f"当前策略档位：{self.settings.strategy_profile}。"
                                 f"{profile_guidance}"
                                 + (
-                                    " 模型主导模式已开启：请独立判断机会；趋势、ADX、15分钟触发、"
+                                    " 模型主导模式已开启：请独立判断机会；趋势、ADX、15分钟触发和"
                                     "置信度不会被本地作为机会否决条件；但最低净盈亏比仍是本地硬限制，"
-                                    "输出目标必须满足 "
+                                    "所有 LONG/SHORT 目标必须满足 "
                                     f"{self.settings.min_net_reward_risk:g}R。"
                                     if self.settings.model_primary_portfolio_enabled
                                     else " 当前配置要求扣除成本后的最低净盈亏比为"
@@ -1168,17 +1186,14 @@ class ResponsesModelClient:
                         and not strong_override
                     ):
                         issues.append(f"{allocation.symbol}:no_aligned_entry_trigger")
-                    net_rr = self._net_reward_risk(
-                        risk_entry, effective_allocation, snapshot
+                net_rr = self._net_reward_risk(
+                    risk_entry, effective_allocation, snapshot
+                )
+                if net_rr < Decimal(str(self.settings.min_net_reward_risk)):
+                    issues.append(
+                        f"{allocation.symbol}:net_reward_risk_below_minimum"
+                        f"(net_rr={net_rr:.3f},min={self.settings.min_net_reward_risk:g})"
                     )
-                    if (
-                        net_rr < Decimal(str(self.settings.min_net_reward_risk))
-                        and not strong_override
-                    ):
-                        issues.append(
-                            f"{allocation.symbol}:net_reward_risk_below_minimum"
-                            f"(net_rr={net_rr:.3f},min={self.settings.min_net_reward_risk:g})"
-                        )
 
             reason_issues = self._reason_contract_issues(
                 effective_allocation.reason_codes,
@@ -1306,6 +1321,20 @@ class ResponsesModelClient:
                     and not strong_override
                 ):
                     issues.append(f"{signal.symbol}:no_aligned_entry_trigger")
+            if signal.entry_min is not None and signal.entry_max is not None:
+                risk_entry = signal.entry_max if direction == 1 else signal.entry_min
+                if signal.invalidation_price is not None and signal.target_price is not None:
+                    distance = abs(risk_entry - signal.invalidation_price)
+                    reward = abs(signal.target_price - risk_entry)
+                    costs = risk_entry * Decimal("0.0015") + risk_entry * abs(
+                        snapshot.funding_rate
+                    )
+                    net_rr = max(Decimal("0"), reward - costs) / (distance + costs)
+                    if net_rr < Decimal(str(self.settings.min_net_reward_risk)):
+                        issues.append(
+                            f"{signal.symbol}:net_reward_risk_below_minimum"
+                            f"(net_rr={net_rr:.3f},min={self.settings.min_net_reward_risk:g})"
+                        )
             issues.extend(
                 f"{signal.symbol}:{issue}"
                 for issue in self._reason_contract_issues(

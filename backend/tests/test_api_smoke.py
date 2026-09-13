@@ -95,7 +95,8 @@ def test_factor_catalog_exposes_research_only_data_boundaries() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["live_trading_connected"] is False
-    assert payload["market_source"] == "Binance USD-M production public market data"
+    assert payload["historical_research_enabled"] is False
+    assert payload["market_source"] == "Binance USD-M public data archive (data.binance.vision)"
     assert len(payload["factors"]) == 12
     sources = {item["key"]: item for item in payload["data_sources"]}
     assert sources["funding"]["available"] is True
@@ -108,7 +109,44 @@ def test_factor_catalog_exposes_research_only_data_boundaries() -> None:
     assert shadow.json() == []
     policy = client.get("/api/v1/factors/policy")
     assert policy.status_code == 200
+    assert policy.json()["enabled"] is False
+    assert policy.json()["historical_research_enabled"] is False
     assert policy.json()["promotion"]["required_windows"] == 30
+
+
+def test_historical_research_endpoints_reject_before_creating_tasks() -> None:
+    class DisabledService:
+        async def create(self, parameters: dict[str, object]) -> str:
+            raise AssertionError(f"disabled service was called: {parameters}")
+
+    with TestClient(app) as client:
+        app.state.factor_research_service = DisabledService()
+        app.state.replay_service = DisabledService()
+        factor_response = client.post(
+            "/api/v1/factors/research",
+            json={
+                "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+                "start_date": "2025-01-01",
+                "end_date": "2025-02-01",
+                "interval": "1h",
+                "forward_bars": 24,
+                "rebalance_bars": 24,
+            },
+        )
+        replay_response = client.post(
+            "/api/v1/replays",
+            json={
+                "mode": "deterministic",
+                "symbols": ["BTCUSDT"],
+                "start_date": "2025-01-01",
+                "end_date": "2025-02-01",
+            },
+        )
+
+    assert factor_response.status_code == 409
+    assert "历史研究已暂停" in factor_response.json()["detail"]
+    assert replay_response.status_code == 409
+    assert "历史研究已暂停" in replay_response.json()["detail"]
 
 
 def test_factor_research_endpoint_passes_validated_parameters_to_service() -> None:
@@ -125,17 +163,21 @@ def test_factor_research_endpoint_passes_validated_parameters_to_service() -> No
 
     with TestClient(app) as client:
         app.state.factor_research_service = StubFactorResearch()
-        response = client.post(
-            "/api/v1/factors/research",
-            json={
-                "symbols": ["btcusdt", "ETHUSDT", "SOLUSDT"],
-                "start_date": "2025-01-01",
-                "end_date": "2025-02-01",
-                "interval": "4h",
-                "forward_bars": 6,
-                "rebalance_bars": 6,
-            },
-        )
+        app.state.settings.historical_research_enabled = True
+        try:
+            response = client.post(
+                "/api/v1/factors/research",
+                json={
+                    "symbols": ["btcusdt", "ETHUSDT", "SOLUSDT"],
+                    "start_date": "2025-01-01",
+                    "end_date": "2025-02-01",
+                    "interval": "4h",
+                    "forward_bars": 6,
+                    "rebalance_bars": 6,
+                },
+            )
+        finally:
+            app.state.settings.historical_research_enabled = False
 
     assert response.status_code == 202
     assert response.json()["id"] == "factor-run-1"

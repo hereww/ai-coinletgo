@@ -9,6 +9,7 @@ from trading_system.api.schemas import (
     IntegrationProbeRequest,
     ManualEntryAdviceRequest,
     ManualEntryRequest,
+    ModelProfileUpdateRequest,
     ModelProfileSelectRequest,
     ModelRelayUpdateRequest,
     PasswordActionRequest,
@@ -119,6 +120,35 @@ def test_model_relay_config_accepts_http_urls_without_a_daily_request_ceiling() 
         ModelProfileSelectRequest(profile_id="unknown")
 
 
+def test_model_profile_update_validates_vllm_fields_and_normalizes_secrets() -> None:
+    request = ModelProfileUpdateRequest(
+        profile_id="vllm",
+        base_url="http://vllm.example:8000/v1/",
+        model_name="Qwen/Qwen3.8-27B-FP8",
+        api_key="  vllm-secret  ",
+        reasoning_effort="high",
+        timeout_seconds=120,
+        strategy_profile="balanced",
+    )
+    assert request.base_url == "http://vllm.example:8000/v1"
+    assert request.api_key == "vllm-secret"
+    assert request.reasoning_effort == "high"
+
+    with pytest.raises(ValidationError):
+        ModelProfileUpdateRequest(
+            profile_id="vllm",
+            base_url="vllm.example:8000/v1",
+            model_name="Qwen/Qwen3.8-27B-FP8",
+        )
+    with pytest.raises(ValidationError):
+        ModelProfileUpdateRequest(
+            profile_id="vllm",
+            base_url="http://vllm.example/v1",
+            model_name="Qwen/Qwen3.8-27B-FP8",
+            historical_research_enabled=True,
+        )
+
+
 def test_pnl_sync_request_requires_an_inclusive_date_range_of_at_most_one_year() -> None:
     request = PnlSyncRequest(start_date="2026-09-04", end_date="2026-09-05")
     assert request.start_date.isoformat() == "2026-09-04"
@@ -173,6 +203,9 @@ def test_opening_strategy_config_is_bounded_and_validates_stop_range() -> None:
     assert request.manual_exit_levels_enabled is True
     assert request.manual_stop_atr == Decimal("1.5")
 
+    disabled_model = ConfigUpdateRequest(model_strategy_enabled=False)
+    assert disabled_model.model_strategy_enabled is False
+
     with pytest.raises(ValidationError, match="min_stop_atr cannot exceed max_stop_atr"):
         ConfigUpdateRequest(min_stop_atr="2.2", max_stop_atr="1.2")
 
@@ -215,10 +248,34 @@ def test_settings_accept_custom_candidate_count_and_validate_stop_order() -> Non
     settings = Settings(candidate_count=25, min_stop_atr=0.2, max_stop_atr=4.5)
     assert settings.candidate_count == 25
     assert settings.min_stop_atr == 0.2
-    assert settings.min_net_reward_risk == 1.8
+    assert settings.min_net_reward_risk == 2.5
 
     with pytest.raises(ValueError, match="min_stop_atr cannot exceed max_stop_atr"):
         Settings(min_stop_atr=4.5, max_stop_atr=0.2)
+
+
+def test_runtime_model_secret_overrides_deployment_secret_without_echoing_it(tmp_path: object) -> None:
+    deployment = tmp_path / "deployment"
+    runtime = tmp_path / "runtime"
+    deployment.mkdir()
+    (deployment / "vllm_model_api_key").write_text("deployment-key\n", encoding="utf-8")
+    settings = Settings(secret_dir=deployment, runtime_secret_dir=runtime)
+
+    assert settings.vllm_model_api_key == "deployment-key"
+    settings.write_runtime_secret("vllm_model_api_key", "runtime-key")
+    assert settings.vllm_model_api_key == "runtime-key"
+    assert (runtime / "vllm_model_api_key").read_text(encoding="utf-8") == "runtime-key\n"
+    assert (runtime / "vllm_model_api_key").stat().st_mode & 0o777 == 0o600
+
+    with pytest.raises(ValueError):
+        settings.write_runtime_secret("historical_research_enabled", "true")
+
+
+def test_risk_limits_default_to_the_tightened_cost_aware_policy() -> None:
+    limits = RiskLimits()
+
+    assert limits.min_net_reward_risk == Decimal("2.5")
+    assert limits.portfolio_rebalance_deadband_fraction == Decimal("0.25")
 
 
 def test_live_settings_keep_a_two_r_minimum_reward_risk_floor(tmp_path: object) -> None:

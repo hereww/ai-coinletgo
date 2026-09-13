@@ -25,6 +25,8 @@ const config = {
   entry_trigger: 'breakout_or_pullback',
   candidate_count: 5,
   scan_interval_minutes: 5,
+  model_strategy_enabled: true,
+  historical_research_enabled: true,
   min_confidence: 0.75,
   min_net_reward_risk: 2,
   min_stop_atr: 0.8,

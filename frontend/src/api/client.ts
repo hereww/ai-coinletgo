@@ -51,6 +51,7 @@ const FIELD_LABELS: Record<string, string> = {
   correlation_limit: '相关性阈值',
   candidate_count: '候选合约数量',
   scan_interval_minutes: '扫描周期',
+  model_strategy_enabled: '模型策略',
   min_confidence: '最低置信度',
   min_net_reward_risk: '最低净盈亏比',
   min_stop_atr: '最小止损距离',
@@ -219,17 +220,30 @@ export const api = {
     method: 'PATCH',
     body: JSON.stringify(payload),
   }),
+  updateModelProfile: (payload: {
+    profile_id: 'relay' | 'vllm'
+    base_url: string | null
+    model_name: string
+    api_key?: string
+    reasoning_effort: IntegrationStatus['model']['reasoning_effort']
+    timeout_seconds: number
+    strategy_profile: IntegrationStatus['model']['strategy_profile']
+  }) => request<IntegrationStatus['model']>('/api/v1/integrations/model/config', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  }),
   selectModelProfile: (profileId: IntegrationStatus['model']['active_profile']) =>
     request<IntegrationStatus['model']>('/api/v1/integrations/model/profile', {
       method: 'PATCH',
       body: JSON.stringify({ profile_id: profileId }),
     }),
   updateConfig: (payload: Partial<RiskConfig> & { password: string }) => {
-    // GET /config includes display-only model metadata. The PATCH schema
-    // deliberately forbids unknown fields, so never echo those values back.
+    // GET /config includes display-only metadata and feature-gate state. The
+    // PATCH schema deliberately forbids these fields, so never echo them back.
     const updates = { ...payload }
     delete updates.model_name
     delete updates.strategy_profile
+    delete updates.historical_research_enabled
     return request<RiskConfig>('/api/v1/config', {
       method: 'PATCH',
       body: JSON.stringify(updates),

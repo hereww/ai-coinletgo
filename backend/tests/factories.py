@@ -54,7 +54,7 @@ def signal(**updates: object) -> TradeSignal:
         "entry_min": Decimal("99.9"),
         "entry_max": Decimal("100.1"),
         "invalidation_price": Decimal("99"),
-        "target_price": Decimal("103"),
+        "target_price": Decimal("106"),
         "thesis": "trend continuation",
         "expires_at": datetime.now(UTC) + timedelta(minutes=15),
     }

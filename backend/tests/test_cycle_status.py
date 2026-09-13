@@ -89,6 +89,29 @@ async def test_cycle_status_distinguishes_exchange_unavailable() -> None:
     assert redis.status["state"] == "EXCHANGE_UNAVAILABLE"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "模型策略周期已完成",
+        "本地规则策略周期已完成",
+        "model cycle completed",
+        "rule-based-v1 cycle completed",
+    ],
+)
+async def test_successful_strategy_cycle_is_not_marked_model_unavailable(
+    detail: str,
+) -> None:
+    redis = StatusRedis()
+    cycle = TradingCycle.__new__(TradingCycle)
+    cycle.redis = redis
+
+    await cycle._finish_cycle(CycleResult(detail=detail), datetime.now(UTC))
+
+    assert redis.status is not None
+    assert redis.status["state"] == "COMPLETED"
+
+
 def test_model_failure_detail_is_operator_friendly() -> None:
     timeout = TradingCycle._model_failure_detail(
         ModelUnavailableError("model relay repair request failed: timed out after 45s")

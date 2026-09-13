@@ -25,6 +25,7 @@ from trading_system.domain.enums import (
 )
 from trading_system.domain.models import (
     AccountState,
+    AIAnalysisResponse,
     Candle,
     ExchangeFilters,
     FactorPolicySnapshot,
@@ -58,6 +59,7 @@ from trading_system.strategy.factors import (
     normalize_factor_values,
 )
 from trading_system.strategy.indicators import atr, strict_pearson_correlation
+from trading_system.strategy.rule_based import RuleBasedStrategy
 from trading_system.strategy.screener import MarketScreener
 from trading_system.strategy.snapshot import build_snapshot
 
@@ -94,11 +96,14 @@ class TradingCycle:
         exchange: BinanceUSDMarketClient,
         model: ResponsesModelClient,
         notifier: TelegramNotifier,
+        *,
+        market_exchange: BinanceUSDMarketClient | None = None,
     ) -> None:
         self.settings = settings
         self.redis = redis
         self.repository = repository
         self.exchange = exchange
+        self.market_exchange = market_exchange or exchange
         self.model = model
         self.notifier = notifier
         self.screener = MarketScreener(
@@ -116,6 +121,7 @@ class TradingCycle:
             volatility_hard_limit_percentile=Decimal(str(settings.volatility_hard_limit_percentile)),
         )
         self.risk = RiskEngine()
+        self.rule_based = RuleBasedStrategy(settings)
         self.portfolio = PortfolioCompiler()
         self.execution = ExecutionManager(exchange, entry_guard=self._entries_allowed)
         self.exits = ExitExecutionManager(exchange)
@@ -231,6 +237,10 @@ class TradingCycle:
             state = "MODEL_THROTTLED"
         elif "超时" in result.detail or "timed out" in result.detail.lower():
             state = "MODEL_TIMEOUT"
+        elif result.detail.endswith("策略周期已完成") or result.detail.endswith(
+            "cycle completed"
+        ):
+            state = "COMPLETED"
         elif "模型" in result.detail or "model" in result.detail.lower():
             state = "MODEL_UNAVAILABLE"
         await self._set_cycle_status(
@@ -305,10 +315,15 @@ class TradingCycle:
 
     async def _run_locked(self, result: CycleResult) -> CycleResult:
         await self.repository.apply_runtime_config(self.settings)
+        # Runtime configuration can be changed from the console without a
+        # worker restart. Keep the local strategy bound to the same validated
+        # Settings instance used by the screener and risk compiler.
+        self.rule_based.settings = self.settings
         self.screener.entry_trigger = self.settings.entry_trigger
         self.screener.trend_adx_min = Decimal(str(self.settings.trend_adx_min))
         self.screener.model_primary_portfolio_enabled = (
-            self.settings.model_primary_portfolio_enabled
+            getattr(self.settings, "model_strategy_enabled", True)
+            and self.settings.model_primary_portfolio_enabled
         )
         self.screener.strong_trend_entry_override_enabled = (
             self.settings.strong_trend_entry_override_enabled
@@ -414,7 +429,7 @@ class TradingCycle:
             "cycle selected symbols=%s",
             sorted(selected_symbols) if selected_symbols else ["AUTO_UNIVERSE"],
         )
-        universe = await self.exchange.get_universe(
+        universe = await self.market_exchange.get_universe(
             0 if selected_symbols else self.settings.universe_size
         )
         if selected_symbols:
@@ -439,16 +454,7 @@ class TradingCycle:
                 eligible,
                 reasons or ["eligible"],
             )
-        candidates = self.screener.rank(snapshots, self.settings.candidate_count)
-        if self.settings.portfolio_strategy_enabled:
-            # Portfolio-v1 owns cross-sectional ranking.  Feed it the complete
-            # market-safe watchlist instead of requiring every symbol to have a
-            # simultaneous trend and 15m trigger.  Those features remain in the
-            # model input and malformed/unsafe targets are still rejected by the
-            # deterministic compiler.  Signal-v1 keeps its strict screener.
-            candidates = self.screener.rank_portfolio(
-                snapshots, limit=self.settings.candidate_count
-            )
+        candidates = self._rank_cycle_candidates(snapshots)
         result.candidates = len(candidates)
         logger.info(
             "cycle candidates count=%d symbols=%s",
@@ -458,49 +464,78 @@ class TradingCycle:
         if not candidates and not (self.settings.portfolio_strategy_enabled and positions):
             result.detail = (
                 "本轮没有通过确定性筛选的候选合约，"
-                "跳过模型请求并等待下一轮配置扫描周期。"
+                "跳过策略决策并等待下一轮配置扫描周期。"
             )
-            logger.info("cycle skipped model request because deterministic candidates are empty")
-            return result
-        if not self.model.configured:
-            result.detail = "model relay not configured; no new decisions"
-            return result
-        if not await self._model_cadence_available():
-            result.detail = (
-                "模型当前扫描周期的去重门禁仍在生效，"
-                "本轮完成行情检查但跳过重复模型请求。"
+            logger.info(
+                "cycle skipped strategy decision because deterministic candidates are empty"
             )
-            logger.info("cycle skipped model request because local cadence window is active")
             return result
-
         expires_at = self._next_cycle_boundary(self.settings.scan_interval_minutes)
-        try:
-            if self.settings.portfolio_strategy_enabled:
-                return await self._run_portfolio_cycle(
-                    result,
-                    candidates,
-                    positions,
-                    snapshots,
-                    account,
-                    mode,
-                    limits,
-                    expires_at,
-                    input_hash=self._input_hash(candidates, positions),
-                    factor_policy_snapshot=factor_policy_snapshot,
+        decision_prompt_version = self.settings.model_prompt_version
+        decision_model_name = self.settings.active_model_name
+        decision_source = "model"
+        if not getattr(self.settings, "model_strategy_enabled", True):
+            local_signals = self.rule_based.build_signals(candidates, expires_at)
+            analysis = AIAnalysisResponse(
+                signals=local_signals,
+                position_reviews=[],
+                market_regime=(
+                    "TRENDING"
+                    if local_signals
+                    else candidates[0].market_regime
+                    if candidates
+                    else "UNCERTAIN"
+                ),
+                summary=(
+                    f"rule-based-v1 根据 {len(local_signals)} 个本地规则信号生成候选决策"
+                ),
+            )
+            decision_prompt_version = "rule-based-v1"
+            decision_model_name = "rule-based-v1"
+            decision_source = "rule-based-v1"
+            logger.info(
+                "cycle using deterministic local strategy signals=%d",
+                len(local_signals),
+            )
+        else:
+            if not self.model.configured:
+                result.detail = "model relay not configured; no new decisions"
+                return result
+            if not await self._model_cadence_available():
+                result.detail = (
+                    "模型当前扫描周期的去重门禁仍在生效，"
+                    "本轮完成行情检查但跳过重复模型请求。"
                 )
-            analysis = await self.model.analyze(candidates, positions, expires_at)
-        except ModelUnavailableError as error:
-            if self._is_model_cadence_error(error):
-                await self._mark_model_cadence()
-            await self.notifier.send("模型中转异常", "模型不可用，本轮禁止新开仓。")
-            # Keep provider/relay internals in logs, but expose a stable and
-            # actionable status to the operator instead of leaking raw HTTP
-            # or timeout wording into the dashboard.
-            result.detail = self._model_failure_detail(error)
-            return result
-        await self._mark_model_cadence()
+                logger.info("cycle skipped model request because local cadence window is active")
+                return result
+            try:
+                if self.settings.portfolio_strategy_enabled:
+                    return await self._run_portfolio_cycle(
+                        result,
+                        candidates,
+                        positions,
+                        snapshots,
+                        account,
+                        mode,
+                        limits,
+                        expires_at,
+                        input_hash=self._input_hash(candidates, positions),
+                        factor_policy_snapshot=factor_policy_snapshot,
+                    )
+                analysis = await self.model.analyze(candidates, positions, expires_at)
+            except ModelUnavailableError as error:
+                if self._is_model_cadence_error(error):
+                    await self._mark_model_cadence()
+                await self.notifier.send("模型中转异常", "模型不可用，本轮禁止新开仓。")
+                # Keep provider/relay internals in logs, but expose a stable and
+                # actionable status to the operator instead of leaking raw HTTP
+                # or timeout wording into the dashboard.
+                result.detail = self._model_failure_detail(error)
+                return result
+            await self._mark_model_cadence()
         logger.info(
-            "cycle model result signals=%d position_reviews=%d regime=%s summary=%s",
+            "cycle decision result source=%s signals=%d position_reviews=%d regime=%s summary=%s",
+            decision_source,
             len(analysis.signals),
             len(analysis.position_reviews),
             analysis.market_regime,
@@ -559,8 +594,8 @@ class TradingCycle:
                 await self.repository.save_signal(
                     signal,
                     status="REJECTED_UNKNOWN_SYMBOL",
-                    prompt_version=self.settings.model_prompt_version,
-                    model_name=self.settings.active_model_name,
+                    prompt_version=decision_prompt_version,
+                    model_name=decision_model_name,
                     input_hash=input_hash,
                 )
                 continue
@@ -578,8 +613,8 @@ class TradingCycle:
             await self.repository.save_signal(
                 signal,
                 status=decision.status.value,
-                prompt_version=self.settings.model_prompt_version,
-                model_name=self.settings.active_model_name,
+                prompt_version=decision_prompt_version,
+                model_name=decision_model_name,
                 input_hash=input_hash,
                 market_snapshot=signal_snapshot,
             )
@@ -604,6 +639,18 @@ class TradingCycle:
             try:
                 entry, protection = await self.execution.execute(intent)
             except Exception as error:
+                # A limit entry can become stale between risk evaluation and
+                # the final quote check.  No exchange write occurs in this
+                # case, so record a no-fill and let the next 5-minute cycle
+                # re-evaluate instead of freezing the whole testnet.
+                if self._is_soft_entry_guard_error(error):
+                    logger.info(
+                        "signal entry skipped because entry guard moved "
+                        "symbol=%s action=%s",
+                        signal.symbol,
+                        signal.action.value,
+                    )
+                    continue
                 result.failed = True
                 if self.execution.last_emergency_orders:
                     await self.repository.save_orders(self.execution.last_emergency_orders)
@@ -641,8 +688,46 @@ class TradingCycle:
                 f"{signal.symbol} {signal.action.value}，数量 {decision.quantity}，保护单已提交。",
             )
         if not result.detail:
-            result.detail = "cycle completed"
+            result.detail = (
+                "模型策略周期已完成"
+                if decision_source == "model"
+                else "本地规则策略周期已完成"
+            )
         return result
+
+    def _rank_cycle_candidates(self, snapshots: list[MarketSnapshot]) -> list[MarketSnapshot]:
+        """Build the model watchlist without starving model-primary signal-v1.
+
+        Portfolio-v1 and model-primary signal-v1 both need a market-safe
+        watchlist.  Only the legacy non-primary signal path requires every
+        symbol to already have a simultaneous trend and 15m trigger.  Keeping
+        this decision in one helper prevents disabling Portfolio-v1 from
+        accidentally restoring the overly strict candidate gate.
+        """
+
+        model_strategy_enabled = getattr(self.settings, "model_strategy_enabled", True)
+        if self.settings.portfolio_strategy_enabled or (
+            model_strategy_enabled and self.settings.model_primary_portfolio_enabled
+        ):
+            return self.screener.rank_portfolio(
+                snapshots, limit=self.settings.candidate_count
+            )
+        if not model_strategy_enabled:
+            # The local strategy needs setup-qualified symbols before the
+            # candidate limit is applied.  Ranking the broad market-safe list
+            # first can otherwise fill all slots with symbols that have no
+            # breakout/pullback or strong-trend setup.
+            candidates = [
+                snapshot
+                for snapshot in snapshots
+                if self.rule_based.eligible(snapshot)
+            ]
+            for snapshot in candidates:
+                snapshot.score = self.screener.score(snapshot)
+            return sorted(candidates, key=self.screener._ranking_key)[
+                : self.settings.candidate_count
+            ]
+        return self.screener.rank(snapshots, self.settings.candidate_count)
 
     @staticmethod
     def _model_failure_detail(error: ModelUnavailableError) -> str:
@@ -1347,7 +1432,10 @@ class TradingCycle:
         )
 
     async def _build_snapshots(self, universe: list[UniverseSymbol]) -> list[MarketSnapshot]:
-        semaphore = asyncio.Semaphore(6)
+        # Each symbol needs five public REST reads on a cold cache. Three
+        # symbols at a time keeps the scan bounded without creating a large
+        # proxy or connection-pool burst at worker startup.
+        semaphore = asyncio.Semaphore(3)
 
         async def build(
             item: UniverseSymbol,
@@ -1363,11 +1451,11 @@ class TradingCycle:
                     "book_depth",
                 )
                 requests = (
-                    self.exchange.get_klines(symbol, "15m", 120),
-                    self.exchange.get_klines(symbol, "1h", 720),
-                    self.exchange.get_klines(symbol, "4h", 120),
-                    self.exchange.get_open_interest(symbol),
-                    self.exchange.get_book_depth(symbol),
+                    self.market_exchange.get_klines(symbol, "15m", 120),
+                    self.market_exchange.get_klines(symbol, "1h", 720),
+                    self.market_exchange.get_klines(symbol, "4h", 120),
+                    self.market_exchange.get_open_interest(symbol),
+                    self.market_exchange.get_book_depth(symbol),
                 )
                 gathered = cast(
                     tuple[Any, ...],
@@ -1564,12 +1652,24 @@ class TradingCycle:
         required_windows = self.settings.factor_promotion_windows
         effective_enabled = (
             self.settings.factor_policy_enabled
+            and self.settings.historical_research_enabled
             and self.settings.binance_environment == "testnet"
         )
         scored = [
             item.model_copy(update={"score": self.screener.score(item)})
             for item in snapshots
         ]
+        if not self.settings.historical_research_enabled:
+            return scored, FactorPolicySnapshot(
+                enabled=False,
+                environment=self.settings.binance_environment,
+                applied_status="DISABLED",
+                rank_weight=rank_weight,
+                minimum_risk_multiplier=minimum_multiplier,
+                promotion_windows=required_windows,
+                promotion_metrics=promotion_metrics([], required_windows),
+                failure_reasons=["historical_research_disabled"],
+            )
         active: dict[str, Any] | None = None
         shadow: dict[str, Any] | None = None
         metrics: dict[str, object] = promotion_metrics([], required_windows)
@@ -1966,7 +2066,14 @@ class TradingCycle:
             manual_exit_levels_enabled=self.settings.manual_exit_levels_enabled,
             manual_stop_atr=Decimal(str(self.settings.manual_stop_atr)),
             manual_take_profit_atr=Decimal(str(self.settings.manual_take_profit_atr)),
-            model_primary_portfolio_enabled=self.settings.model_primary_portfolio_enabled,
+            model_primary_portfolio_enabled=(
+                getattr(self.settings, "model_strategy_enabled", True)
+                and self.settings.model_primary_portfolio_enabled
+            ),
+            rule_based_strategy_enabled=(
+                not getattr(self.settings, "model_strategy_enabled", True)
+                and self.settings.binance_environment == "testnet"
+            ),
             strong_trend_entry_override_enabled=self.settings.strong_trend_entry_override_enabled,
             strong_trend_adx_min=Decimal(str(self.settings.strong_trend_adx_min)),
             min_confidence=Decimal(str(self.settings.min_confidence)),

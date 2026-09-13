@@ -52,18 +52,41 @@ async def run_worker() -> None:
     repository = Repository(database, settings.app_timezone)
     await repository.apply_runtime_config(settings)
     exchange = BinanceUSDMarketClient(settings)
-    public_market = BinancePublicMarketCache(
+    market_exchange = BinanceUSDMarketClient(
+        settings,
+        public_base_url=settings.binance_live_base_url,
+        # Model research uses the production public market-data API. Account,
+        # position, protection, and execution requests remain on testnet, so
+        # scanning cannot consume the trading API's REST rate-limit bucket.
+        proxy_url=settings.http_proxy_url,
+    )
+    trading_market = BinancePublicMarketCache(
         settings.binance_ws_url,
         proxy_url=settings.binance_http_proxy_url,
     )
-    exchange.attach_market_cache(public_market)
+    analysis_market = BinancePublicMarketCache(
+        settings.binance_ws_live_url,
+        proxy_url=settings.http_proxy_url,
+    )
+    exchange.attach_market_cache(trading_market)
+    market_exchange.attach_market_cache(analysis_market)
     if exchange.configured and (
         not settings.binance_proxy_enabled or settings.binance_http_proxy_configured
     ):
-        public_market.start()
+        trading_market.start()
+    if not settings.http_proxy_enabled or settings.http_proxy_configured:
+        analysis_market.start()
     model = ResponsesModelClient(settings)
     notifier = TelegramNotifier(settings)
-    cycle = TradingCycle(settings, redis, repository, exchange, model, notifier)
+    cycle = TradingCycle(
+        settings,
+        redis,
+        repository,
+        exchange,
+        model,
+        notifier,
+        market_exchange=market_exchange,
+    )
     protection = PositionProtectionMonitor(
         settings, repository, exchange, notifier, redis=redis
     )
@@ -189,13 +212,15 @@ async def run_worker() -> None:
         if hft_task is not None:
             with suppress(asyncio.CancelledError):
                 await hft_task
-        await public_market.close()
+        await analysis_market.close()
+        await trading_market.close()
         with suppress(asyncio.CancelledError):
             await heartbeat_task
         if user_stream is not None:
             await user_stream.close()
         await notifier.close()
         await model.close()
+        await market_exchange.close()
         await exchange.close()
         await redis.aclose()
         await database.dispose()

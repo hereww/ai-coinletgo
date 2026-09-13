@@ -65,6 +65,38 @@ class ModelRelayUpdateRequest(BaseModel):
         return normalized
 
 
+class ModelProfileUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: Literal["relay", "vllm"]
+    base_url: str | None = Field(default=None, max_length=500)
+    model_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:/-]+$")
+    api_key: str | None = Field(default=None, max_length=2_048)
+    reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "medium"
+    timeout_seconds: float = Field(default=45.0, gt=1, le=120)
+    strategy_profile: Literal["conservative", "balanced", "trend_following", "scalping"] = (
+        "trend_following"
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().rstrip("/")
+        if not normalized.startswith(("http://", "https://")):
+            raise ValueError("model base_url must use http:// or https://")
+        return normalized
+
+    @field_validator("api_key")
+    @classmethod
+    def normalize_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
 class ModelProfileSelectRequest(BaseModel):
     profile_id: Literal["relay", "vllm"]
 
@@ -86,6 +118,7 @@ class ConfigUpdateRequest(BaseModel):
     entry_trigger: Literal["breakout_or_pullback", "breakout_only", "pullback_only"] | None = None
     candidate_count: int | None = Field(default=None, ge=1)
     scan_interval_minutes: Literal[5, 15, 30, 60] | None = None
+    model_strategy_enabled: bool | None = None
     min_confidence: Decimal | None = Field(default=None, ge=0, le=1)
     min_net_reward_risk: Decimal | None = Field(default=None, gt=0)
     min_stop_atr: Decimal | None = Field(default=None, gt=0)

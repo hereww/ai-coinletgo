@@ -24,8 +24,9 @@ const catalog = {
     { key: 'price', label: '价格K线', available: true, detail: '历史K线' },
     { key: 'open_interest', label: '历史OI', available: false, detail: '尚未接入' },
   ],
-  market_source: 'Binance USD-M production public market data',
+  market_source: 'Binance USD-M public data archive (data.binance.vision)',
   live_trading_connected: false,
+  historical_research_enabled: true,
 }
 
 const result = {
@@ -90,6 +91,7 @@ beforeEach(() => {
   apiMock.factorShadowRankings.mockReset().mockResolvedValue([])
   apiMock.factorPolicyStatus.mockReset().mockResolvedValue({
     enabled: true,
+    historical_research_enabled: true,
     environment: 'testnet',
     rank_weight: 0.2,
     minimum_risk_multiplier: 0.75,
@@ -114,6 +116,17 @@ it('shows catalog data boundaries before a run', async () => {
   expect(screen.getByText('历史OI')).toBeInTheDocument()
   expect(screen.getByText('尚未运行研究')).toBeInTheDocument()
   expect(screen.getByText('12 个候选因子等待评估')).toBeInTheDocument()
+})
+
+it('disables submissions when historical research is paused', async () => {
+  apiMock.factorCatalog.mockResolvedValue({
+    ...catalog,
+    historical_research_enabled: false,
+  })
+  renderPage()
+  expect(await screen.findByText('当前仅保留模型驱动的测试网自动交易')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '历史研究已暂停' })).toBeDisabled()
+  expect(apiMock.researchFactors).not.toHaveBeenCalled()
 })
 
 it('submits normalized symbols and renders statistical evidence', async () => {

@@ -12,11 +12,26 @@ export default function SettingsPage() {
   const queryClient = useQueryClient()
   const dashboard = useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard, refetchInterval: 15_000 })
   const integrations = useQuery({ queryKey: ['integrations'], queryFn: api.integrations, refetchInterval: 15_000 })
-  const [modelForm, setModelForm] = useState({ base_url: '', model_name: 'gpt-5.6', reasoning_effort: 'medium' as IntegrationStatus['model']['reasoning_effort'], timeout_seconds: 120, strategy_profile: 'trend_following' as IntegrationStatus['model']['strategy_profile'] })
+  const [modelProfileId, setModelProfileId] = useState<'relay' | 'vllm'>('relay')
+  const [modelForm, setModelForm] = useState({ base_url: '', model_name: 'gpt-5.6', api_key: '', reasoning_effort: 'medium' as IntegrationStatus['model']['reasoning_effort'], timeout_seconds: 120, strategy_profile: 'trend_following' as IntegrationStatus['model']['strategy_profile'] })
   const logout = useMutation({ mutationFn: api.logout, onSuccess: () => { queryClient.clear(); window.location.reload() } })
   const probeTestnet = useMutation({ mutationFn: () => api.probeIntegration('testnet'), onSuccess: () => integrations.refetch() })
   const probeModel = useMutation({ mutationFn: () => api.probeIntegration('model'), onSuccess: () => integrations.refetch() })
-  const saveModel = useMutation({ mutationFn: () => api.updateModelIntegration({ ...modelForm, base_url: modelForm.base_url.trim() || null }), onSuccess: () => integrations.refetch() })
+  const saveModel = useMutation({
+    mutationFn: () => api.updateModelProfile({
+      profile_id: modelProfileId,
+      base_url: modelForm.base_url.trim() || null,
+      model_name: modelForm.model_name.trim(),
+      ...(modelForm.api_key.trim() ? { api_key: modelForm.api_key.trim() } : {}),
+      reasoning_effort: modelForm.reasoning_effort,
+      timeout_seconds: modelForm.timeout_seconds,
+      strategy_profile: modelForm.strategy_profile,
+    }),
+    onSuccess: () => {
+      setModelForm((value) => ({ ...value, api_key: '' }))
+      integrations.refetch()
+    },
+  })
   const selectModel = useMutation({
     mutationFn: (profileId: IntegrationStatus['model']['active_profile']) => api.selectModelProfile(profileId),
     onSuccess: () => {
@@ -26,9 +41,9 @@ export default function SettingsPage() {
   })
   useEffect(() => {
     const model = integrations.data?.model
-    const relay = model?.profiles.find((profile) => profile.id === 'relay')
-    if (model && relay) setModelForm({ base_url: relay.base_url ?? '', model_name: relay.model_name, reasoning_effort: model.reasoning_effort, timeout_seconds: model.timeout_seconds, strategy_profile: model.strategy_profile })
-  }, [integrations.data])
+    const profile = model?.profiles.find((item) => item.id === modelProfileId)
+    if (model && profile) setModelForm((value) => ({ ...value, base_url: profile.base_url ?? '', model_name: profile.model_name, api_key: '', reasoning_effort: model.reasoning_effort, timeout_seconds: model.timeout_seconds, strategy_profile: model.strategy_profile }))
+  }, [integrations.data, modelProfileId])
   if (dashboard.isLoading || integrations.isLoading) return <><PageHeader title="设置" subtitle="接入、运行环境与会话" /><PageLoading /></>
   if (dashboard.isError || integrations.isError || !dashboard.data || !integrations.data) return <><PageHeader title="设置" subtitle="接入、运行环境与会话" /><PageError message={dashboard.error?.message ?? integrations.error?.message ?? '系统状态不可用'} retry={() => { dashboard.refetch(); integrations.refetch() }} /></>
   const { data } = dashboard
@@ -82,18 +97,20 @@ export default function SettingsPage() {
           {selectModel.error ? <div className="inline-error" role="alert">{selectModel.error.message}</div> : null}
           {selectModel.isSuccess ? <div className="success-note" role="status">模型已切换，下个分析周期生效</div> : null}
 
-          <div className="subsection-head"><h3>策略与中转配置</h3><span>模型切换不会改变风控参数</span></div>
+          <div className="subsection-head"><h3>模型配置</h3><span>模型切换不会改变风控参数</span></div>
+          <label className="field-label">编辑模型<select value={modelProfileId} onChange={(event) => setModelProfileId(event.target.value as 'relay' | 'vllm')}><option value="relay">OpenAI 中转</option><option value="vllm">自建 vLLM</option></select></label>
           <div className="form-grid">
-            <label className="field-label">OpenAI 中转 Base URL<input value={modelForm.base_url} onChange={(event) => setModelForm((value) => ({ ...value, base_url: event.target.value }))} placeholder="https://relay.example.com 或 .../v1" /></label>
-            <label className="field-label">OpenAI 中转模型<input value={modelForm.model_name} onChange={(event) => setModelForm((value) => ({ ...value, model_name: event.target.value }))} /></label>
+            <label className="field-label">{modelProfileId === 'vllm' ? '自建 vLLM 接口地址' : 'OpenAI 中转 Base URL'}<input value={modelForm.base_url} onChange={(event) => setModelForm((value) => ({ ...value, base_url: event.target.value }))} placeholder={modelProfileId === 'vllm' ? 'http://127.0.0.1:8000/v1' : 'https://relay.example.com 或 .../v1'} /></label>
+            <label className="field-label">{modelProfileId === 'vllm' ? '自建 vLLM 模型' : 'OpenAI 中转模型'}<input value={modelForm.model_name} onChange={(event) => setModelForm((value) => ({ ...value, model_name: event.target.value }))} /></label>
+            <label className="field-label">{modelProfileId === 'vllm' ? '自建 vLLM API Key' : 'OpenAI 中转 API Key'}<input type="password" value={modelForm.api_key} onChange={(event) => setModelForm((value) => ({ ...value, api_key: event.target.value }))} placeholder={model.profiles.find((profile) => profile.id === modelProfileId)?.api_key_configured ? '已配置，留空保持不变' : '输入 API Key'} autoComplete="new-password" /></label>
             <label className="field-label">AI 策略模板<select value={modelForm.strategy_profile} onChange={(event) => setModelForm((value) => ({ ...value, strategy_profile: event.target.value as IntegrationStatus['model']['strategy_profile'] }))}><option value="trend_following">趋势跟随（默认）</option><option value="balanced">平衡</option><option value="conservative">保守</option><option value="scalping">短线</option></select></label>
             <label className="field-label">推理强度<select value={modelForm.reasoning_effort} onChange={(event) => setModelForm((value) => ({ ...value, reasoning_effort: event.target.value as IntegrationStatus['model']['reasoning_effort'] }))}><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
             <label className="field-label">超时（秒）<input type="number" min={2} max={120} value={modelForm.timeout_seconds} onChange={(event) => setModelForm((value) => ({ ...value, timeout_seconds: Number(event.target.value) }))} /></label>
             <div className="field-label"><span>模型调用额度</span><div className="field-value">不限制</div></div>
           </div>
           <dl><div><dt>结构化探针</dt><dd className={model.health.state === 'HEALTHY' ? 'positive' : 'warning'}>{model.health.detail ?? model.health.state}</dd></div></dl>
-          <p className="setup-note"><KeyRound size={14} /> 每个模型使用独立的服务器 secret；API Key 不进入浏览器、数据库或审计日志。结构化探针始终测试当前选中的模型。</p>
-          <div className="integration-actions"><Button onClick={() => saveModel.mutate()} disabled={saveModel.isPending}>{saveModel.isPending ? '保存中...' : '保存策略与中转设置'}</Button><Button variant="secondary" icon={<Wifi size={15} />} onClick={() => probeModel.mutate()} disabled={probeModel.isPending}>{probeModel.isPending ? '探针运行中...' : '测试当前模型'}</Button></div>
+          <p className="setup-note"><KeyRound size={14} /> API Key 只写入服务器运行时 secret，不进入数据库、页面回显或审计日志。留空表示保持原 Key 不变。结构化探针始终测试当前选中的模型。</p>
+          <div className="integration-actions"><Button onClick={() => saveModel.mutate()} disabled={saveModel.isPending || !modelForm.base_url.trim() || !modelForm.model_name.trim()}>{saveModel.isPending ? '保存中...' : `保存${modelProfileId === 'vllm' ? '自建 vLLM' : '中转'}设置`}</Button><Button variant="secondary" icon={<Wifi size={15} />} onClick={() => probeModel.mutate()} disabled={probeModel.isPending}>{probeModel.isPending ? '探针运行中...' : '测试当前模型'}</Button></div>
           {saveModel.error ? <div className="inline-error" role="alert">{saveModel.error.message}</div> : null}
           {saveModel.isSuccess ? <div className="success-note" role="status">策略与中转设置已保存</div> : null}
           {probeModel.error ? <div className="inline-error" role="alert">{probeModel.error.message}</div> : null}

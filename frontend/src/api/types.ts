@@ -158,6 +158,8 @@ export interface RiskConfig {
   entry_trigger: 'breakout_or_pullback' | 'breakout_only' | 'pullback_only'
   candidate_count: number
   scan_interval_minutes: number
+  model_strategy_enabled: boolean
+  historical_research_enabled: boolean
   min_confidence: number
   min_net_reward_risk: number
   min_stop_atr: number
@@ -383,6 +385,7 @@ export interface FactorCatalog {
   data_sources: FactorDataSource[]
   market_source: string
   live_trading_connected: false
+  historical_research_enabled: boolean
 }
 
 export interface FactorResearchRequest {
@@ -559,6 +562,7 @@ export interface FactorPromotionMetrics {
 
 export interface FactorPolicyStatus {
   enabled: boolean
+  historical_research_enabled: boolean
   environment: 'testnet' | 'live'
   rank_weight: number
   minimum_risk_multiplier: number
